@@ -9,26 +9,22 @@ on:
     branches:
       - master
       - dev
-  workflow_dispatch: # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     
-    strategy:
-      matrix:
-        java: [ '21' ]
-    
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # 获取所有历史记录，用于版本号
+        fetch-depth: 0
     
-    - name: Setup Java ${{ matrix.java }}
+    - name: Setup Java 21
       uses: actions/setup-java@v4
       with:
-        java-version: ${{ matrix.java }}
+        java-version: '21'
         distribution: 'temurin'
     
     - name: Setup Gradle
@@ -42,73 +38,93 @@ jobs:
     - name: Build with Gradle
       run: ./gradlew iris
       env:
-        # 设置构建缓存，加速构建
         GRADLE_OPTS: -Dorg.gradle.daemon=false
     
-    - name: Get Git short version
-      id: get_version
+    - name: Get Git version info
+      id: version
       run: |
         SHORT_SHA=$(git rev-parse --short HEAD)
+        BRANCH_NAME=${GITHUB_REF#refs/heads/}
+        TIMESTAMP=$(date +'%Y-%m-%d %H:%M:%S')
+        
         echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_OUTPUT
-        echo "version=$SHORT_SHA" >> $GITHUB_OUTPUT
+        echo "BRANCH=$BRANCH_NAME" >> $GITHUB_OUTPUT
+        echo "TIMESTAMP=$TIMESTAMP" >> $GITHUB_OUTPUT
+        echo "VERSION=$SHORT_SHA" >> $GITHUB_OUTPUT
     
-    - name: Find and rename JAR file
+    - name: Find JAR file
       id: find_jar
       run: |
-        # 查找 JAR 文件
-        if [ -f "build/Iris.jar" ]; then
-          JAR_PATH="build/Iris.jar"
-          NEW_NAME="Iris-${{ steps.get_version.outputs.SHORT_SHA }}.jar"
+        # 优先在 build/libs 目录查找
+        if [ -d "build/libs" ]; then
+          echo "Searching in build/libs directory..."
+          JAR_FILE=$(find build/libs -name "*.jar" -type f | head -1)
         else
-          # 查找匹配 Iris-*.jar 的文件
-          JAR_PATH=$(find build -name "Iris-*.jar" -type f | head -1)
-          if [ -z "$JAR_PATH" ]; then
-            echo "No JAR file found!"
-            exit 1
-          fi
-          # 提取基础文件名并添加版本号
-          BASE_NAME=$(basename "$JAR_PATH" .jar)
-          NEW_NAME="${BASE_NAME}-${{ steps.get_version.outputs.SHORT_SHA }}.jar"
+          echo "Searching in build directory..."
+          JAR_FILE=$(find build -maxdepth 2 -name "*.jar" -type f | head -1)
         fi
         
-        # 重命名文件
-        cp "$JAR_PATH" "build/$NEW_NAME"
-        echo "JAR_PATH=build/$NEW_NAME" >> $GITHUB_OUTPUT
-        echo "JAR_NAME=$NEW_NAME" >> $GITHUB_OUTPUT
+        if [ -z "$JAR_FILE" ]; then
+          echo "Error: No JAR file found!"
+          ls -la build/ 2>/dev/null || echo "build directory does not exist"
+          exit 1
+        fi
         
-        # 创建符号链接为 Iris.jar（可选）
-        ln -sf "$NEW_NAME" "build/Iris.jar"
+        echo "Found JAR: $JAR_FILE"
+        echo "JAR_PATH=$JAR_FILE" >> $GITHUB_OUTPUT
+        echo "JAR_NAME=$(basename $JAR_FILE)" >> $GITHUB_OUTPUT
+        
+        # 复制到 build 目录并重命名
+        FINAL_NAME="Iris-${{ steps.version.outputs.SHORT_SHA }}.jar"
+        FINAL_PATH="build/$FINAL_NAME"
+        cp "$JAR_FILE" "$FINAL_PATH"
+        echo "FINAL_PATH=$FINAL_PATH" >> $GITHUB_OUTPUT
+        echo "FINAL_NAME=$FINAL_NAME" >> $GITHUB_OUTPUT
+    
+    - name: List build directory
+      run: |
+        echo "Build directory contents:"
+        ls -la build/ 2>/dev/null || echo "No build directory"
+        echo ""
+        echo "Looking for JAR files:"
+        find . -name "*.jar" -type f 2>/dev/null || true
     
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: iris-${{ steps.get_version.outputs.SHORT_SHA }}
+        name: iris-${{ steps.version.outputs.SHORT_SHA }}
         path: |
           build/*.jar
-        retention-days: 7
+          !build/libs/  # 排除子目录
+        if-no-files-found: error
     
     - name: Create Pre-release
-      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev'
+      if: github.event_name == 'push' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev')
       uses: softprops/action-gh-release@v1
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
-        tag_name: pre-${{ steps.get_version.outputs.SHORT_SHA }}
-        name: Pre-release ${{ steps.get_version.outputs.SHORT_SHA }}
+        tag_name: pre-${{ steps.version.outputs.VERSION }}
+        name: "Pre-release ${{ steps.version.outputs.VERSION }} (${{ steps.version.outputs.BRANCH }})"
         body: |
           ## 自动构建的预发布版本
           
           **Git Commit:** ${{ github.sha }}
-          **分支:** ${{ github.ref_name }}
-          **构建时间:** ${{ fromJSON(steps.get_version.outputs.time) }}
+          **短版本号:** ${{ steps.version.outputs.VERSION }}
+          **分支:** ${{ steps.version.outputs.BRANCH }}
+          **构建时间:** ${{ steps.version.outputs.TIMESTAMP }}
           
           ### 下载
-          - [Iris-${{ steps.get_version.outputs.SHORT_SHA }}.jar](Iris-${{ steps.get_version.outputs.SHORT_SHA }}.jar)
+          下载链接: [Iris-${{ steps.version.outputs.VERSION }}.jar](Iris-${{ steps.version.outputs.VERSION }}.jar)
           
-          ### 变更
+          ### 提交信息
+          ```text
           ${{ github.event.head_commit.message }}
+          ```
+          
+          > 此版本为自动构建的预发布版本，仅用于测试。
         draft: false
         prerelease: true
         files: |
-          build/*.jar
-        generate_release_notes: true
+          ${{ steps.find_jar.outputs.FINAL_PATH }}
+        generate_release_notes: false
