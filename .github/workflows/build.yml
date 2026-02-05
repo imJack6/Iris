@@ -1,0 +1,114 @@
+name: Build and Create Pre-release
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+  pull_request:
+    branches:
+      - master
+      - dev
+  workflow_dispatch: # 允许手动触发
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        java: [ '21' ]
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0  # 获取所有历史记录，用于版本号
+    
+    - name: Setup Java ${{ matrix.java }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ matrix.java }}
+        distribution: 'temurin'
+    
+    - name: Setup Gradle
+      uses: gradle/actions/setup-gradle@v3
+      with:
+        gradle-version: '8.5'
+    
+    - name: Make gradlew executable
+      run: chmod +x gradlew
+    
+    - name: Build with Gradle
+      run: ./gradlew iris
+      env:
+        # 设置构建缓存，加速构建
+        GRADLE_OPTS: -Dorg.gradle.daemon=false
+    
+    - name: Get Git short version
+      id: get_version
+      run: |
+        SHORT_SHA=$(git rev-parse --short HEAD)
+        echo "SHORT_SHA=$SHORT_SHA" >> $GITHUB_OUTPUT
+        echo "version=$SHORT_SHA" >> $GITHUB_OUTPUT
+    
+    - name: Find and rename JAR file
+      id: find_jar
+      run: |
+        # 查找 JAR 文件
+        if [ -f "build/Iris.jar" ]; then
+          JAR_PATH="build/Iris.jar"
+          NEW_NAME="Iris-${{ steps.get_version.outputs.SHORT_SHA }}.jar"
+        else
+          # 查找匹配 Iris-*.jar 的文件
+          JAR_PATH=$(find build -name "Iris-*.jar" -type f | head -1)
+          if [ -z "$JAR_PATH" ]; then
+            echo "No JAR file found!"
+            exit 1
+          fi
+          # 提取基础文件名并添加版本号
+          BASE_NAME=$(basename "$JAR_PATH" .jar)
+          NEW_NAME="${BASE_NAME}-${{ steps.get_version.outputs.SHORT_SHA }}.jar"
+        fi
+        
+        # 重命名文件
+        cp "$JAR_PATH" "build/$NEW_NAME"
+        echo "JAR_PATH=build/$NEW_NAME" >> $GITHUB_OUTPUT
+        echo "JAR_NAME=$NEW_NAME" >> $GITHUB_OUTPUT
+        
+        # 创建符号链接为 Iris.jar（可选）
+        ln -sf "$NEW_NAME" "build/Iris.jar"
+    
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: iris-${{ steps.get_version.outputs.SHORT_SHA }}
+        path: |
+          build/*.jar
+        retention-days: 7
+    
+    - name: Create Pre-release
+      if: github.ref == 'refs/heads/master' || github.ref == 'refs/heads/dev'
+      uses: softprops/action-gh-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: pre-${{ steps.get_version.outputs.SHORT_SHA }}
+        name: Pre-release ${{ steps.get_version.outputs.SHORT_SHA }}
+        body: |
+          ## 自动构建的预发布版本
+          
+          **Git Commit:** ${{ github.sha }}
+          **分支:** ${{ github.ref_name }}
+          **构建时间:** ${{ fromJSON(steps.get_version.outputs.time) }}
+          
+          ### 下载
+          - [Iris-${{ steps.get_version.outputs.SHORT_SHA }}.jar](Iris-${{ steps.get_version.outputs.SHORT_SHA }}.jar)
+          
+          ### 变更
+          ${{ github.event.head_commit.message }}
+        draft: false
+        prerelease: true
+        files: |
+          build/*.jar
+        generate_release_notes: true
