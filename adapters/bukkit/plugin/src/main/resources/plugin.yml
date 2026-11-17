@@ -1,0 +1,30 @@
+name: ${name}
+version: ${version}
+main: ${main}
+folia-supported: true
+load: STARTUP
+loadbefore: [ Multiverse-Core ]
+authors: [ cyberpwn, NextdoorPsycho, Vatuu ]
+website: VolmitSoftware.com
+description: More than a Dimension!
+commands:
+  iris:
+    aliases: [ ir, irs ]
+permissions:
+  iris.update:
+    description: Allows viewing Iris updates in VolmLib's combined update reports.
+    default: op
+  iris.debugdump:
+    description: Allows creating and optionally uploading diagnostic reports.
+    default: op
+  iris.language.self:
+    description: Allows choosing your own language for this plugin.
+    default: true
+  iris.all:
+    description: Allows use of the full /iris command tree (worlds, studio, pregen, packs, developer tools).
+    default: op
+  iris.treefeller:
+    description: Allows survival players to fell Iris-managed trees with an axe.
+    default: op
+api-version: '${apiVersion}'
+libraries: [ ${libraries} ]

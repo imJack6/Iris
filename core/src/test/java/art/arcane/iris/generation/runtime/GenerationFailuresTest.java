@@ -1,0 +1,165 @@
+package art.arcane.iris.generation.runtime;
+
+import art.arcane.iris.generation.stream.ProvisionalAnswerException;
+import art.arcane.iris.world.history.SavedBiomeUnavailableException;
+import art.arcane.volmlib.nativelib.terrain.NativePlacementFailures;
+import art.arcane.volmlib.util.mantle.MantleClosedException;
+import org.junit.Test;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.channels.ClosedByInterruptException;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.RejectedExecutionException;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThrows;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+
+public class GenerationFailuresTest {
+    @Test
+    public void engineAndLifecycleFailuresAreRecognizedThroughWrappers() {
+        assertTrue(GenerationFailures.isEngineFailure(new GenerationClosedException("router closed")));
+        assertTrue(GenerationFailures.isEngineFailure(new MantleClosedException("Tectonic Plate is closed!")));
+        assertTrue(GenerationFailures.isEngineFailure(new RejectedExecutionException("pool shut down")));
+        assertTrue(GenerationFailures.isEngineFailure(new ClosedByInterruptException()));
+        assertTrue(GenerationFailures.isEngineFailure(new SavedBiomeUnavailableException("loading", true)));
+        assertTrue(GenerationFailures.isEngineFailure(new GenerationSessionException("sealed", true)));
+        assertTrue(GenerationFailures.isEngineFailure(new OutOfMemoryError()));
+        assertTrue(GenerationFailures.isEngineFailure(new ProvisionalAnswerException("water not planned")));
+        assertTrue(GenerationFailures.isEngineFailure(new CompletionException(
+                new IllegalStateException("placement failed", new GenerationClosedException("router closed")))));
+    }
+
+    @Test
+    public void mantleInputOutputIsAnEngineFailure() {
+        assertTrue(GenerationFailures.isEngineFailure(new UncheckedIOException(new IOException("plate read"))));
+        assertTrue(GenerationFailures.isEngineFailure(new IllegalStateException("placement failed",
+                new IOException("plate read"))));
+    }
+
+    @Test
+    public void skippedPlacementRethrowsEngineFailuresAndReturnsOnContentFailures() {
+        GenerationFailures.skipPlacement(new IllegalArgumentException("Invalid blockFace"),
+                "decoration", "minecraft:vine", 1, 2, 3, "test/biome");
+        GenerationClosedException closed = new GenerationClosedException("router closed");
+        assertSame(closed, assertThrows(GenerationClosedException.class, () -> GenerationFailures.skipPlacement(closed,
+                "decoration", "minecraft:vine", 1, 2, 3, "test/biome")));
+    }
+
+    @Test
+    public void hydrologyPlanFailuresAreEngineFailuresEvenInsideAPlacementScope() {
+        HydrologyPlanException plan = new HydrologyPlanException("plan broke", new IllegalStateException("reach 7"));
+        assertTrue(GenerationFailures.isEngineFailure(plan));
+        assertTrue(GenerationFailures.isEngineFailure(new IllegalStateException("decorator failed", plan)));
+        assertSame(plan, assertThrows(HydrologyPlanException.class, () -> GenerationFailures.skipPlacement(plan,
+                "decoration", "minecraft:vine", 1, 2, 3, "test/biome")));
+    }
+
+    @Test
+    public void nativePlacementFailuresFollowTheSameRule() {
+        GenerationFailures.bindNativeFailures();
+        try {
+            NativePlacementFailures.skip(new IllegalArgumentException("bad feature"), "imported feature", "test:feature", 16, 32);
+            GenerationClosedException closed = new GenerationClosedException("router closed");
+            assertSame(closed, assertThrows(GenerationClosedException.class, () -> NativePlacementFailures.skip(closed,
+                    "imported feature", "test:feature", 16, 32)));
+        } finally {
+            NativePlacementFailures.register(null);
+        }
+    }
+
+    @Test
+    public void skipWarningNamesBlockPositionBiomeAndFailureOnOneLine() {
+        String line = GenerationFailures.skipWarning("decoration", "minecraft:vine", 1, 2, 3, "test/biome",
+                new IllegalArgumentException("Invalid\nblockFace"), 0L);
+        assertEquals("Skipped decoration minecraft:vine at 1,2,3 biome test/biome: IllegalArgumentException: Invalid blockFace"
+                + " (GenerationFailuresTest.skipWarningNamesBlockPositionBiomeAndFailureOnOneLine)", line);
+    }
+
+    @Test
+    public void repeatedSkipsAreLimitedPerKeyAndCountedOnTheNextLine() {
+        long start = 1_000_000_000L;
+        assertEquals(0L, GenerationFailures.claimSkipWarning("limit-test", start));
+        assertEquals(-1L, GenerationFailures.claimSkipWarning("limit-test", start + 1L));
+        assertEquals(-1L, GenerationFailures.claimSkipWarning("limit-test", start + 2L));
+        assertEquals(0L, GenerationFailures.claimSkipWarning("limit-test-other", start + 2L));
+        assertEquals(2L, GenerationFailures.claimSkipWarning("limit-test", start + GenerationFailures.SKIP_WARNING_NANOS + 1L));
+    }
+
+    @Test
+    public void contentFailuresRemainSkippable() {
+        assertFalse(GenerationFailures.isEngineFailure(new IllegalArgumentException("malformed object")));
+        assertFalse(GenerationFailures.isEngineFailure(new NullPointerException("missing block")));
+        assertFalse(GenerationFailures.isEngineFailure(new IllegalStateException("unrelated")));
+    }
+
+    @Test
+    public void permanentSavedBiomeUnavailabilityIsAContentFailure() {
+        assertFalse(GenerationFailures.isEngineFailure(new SavedBiomeUnavailableException(
+                "This chunk has no exact saved Iris biome assignment for generation 3.", false)));
+        assertFalse(GenerationFailures.isEngineFailure(new SavedBiomeUnavailableException(
+                "Unable to read the saved biome at chunk 0,0.", new IllegalArgumentException("bad header"))));
+    }
+
+    @Test
+    public void anyFailureOnAnInterruptedThreadIsAnEngineFailure() {
+        Thread.currentThread().interrupt();
+        try {
+            assertTrue(GenerationFailures.isEngineFailure(new IllegalArgumentException("malformed object")));
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    public void shutdownFailuresAreTheLifecycleSubsetOfEngineFailures() {
+        assertTrue(GenerationFailures.isShutdownFailure(new GenerationClosedException("router closed")));
+        assertTrue(GenerationFailures.isShutdownFailure(new MantleClosedException("Tectonic Plate is closed!")));
+        assertTrue(GenerationFailures.isShutdownFailure(new RejectedExecutionException("pool shut down")));
+        assertTrue(GenerationFailures.isShutdownFailure(new ClosedByInterruptException()));
+        assertTrue(GenerationFailures.isShutdownFailure(new GenerationSessionException("sealed", true)));
+        assertTrue(GenerationFailures.isShutdownFailure(new IllegalStateException("bind failed",
+                new CompletionException(new InterruptedException()))));
+
+        assertFalse(GenerationFailures.isShutdownFailure(new OutOfMemoryError()));
+        assertFalse(GenerationFailures.isShutdownFailure(new NoClassDefFoundError("art/arcane/Missing")));
+        assertFalse(GenerationFailures.isShutdownFailure(new GenerationSessionException("wrong engine")));
+        assertFalse(GenerationFailures.isShutdownFailure(new IllegalStateException(
+                "Iris generation history is unusable", new IOException("registry definition changed"))));
+    }
+
+    @Test
+    public void anyFailureOnAnInterruptedThreadIsAShutdownFailure() {
+        Thread.currentThread().interrupt();
+        try {
+            assertTrue(GenerationFailures.isShutdownFailure(new IllegalStateException("history unusable")));
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    @Test
+    public void rethrowPropagatesEngineFailuresAndReturnsForContentFailures() {
+        GenerationClosedException closed = new GenerationClosedException("router closed");
+        try {
+            GenerationFailures.rethrowEngineFailure(closed);
+            fail("engine failure was not rethrown");
+        } catch (GenerationClosedException rethrown) {
+            assertSame(closed, rethrown);
+        }
+
+        GenerationSessionException sealed = new GenerationSessionException("sealed", true);
+        try {
+            GenerationFailures.rethrowEngineFailure(sealed);
+            fail("checked engine failure was not rethrown");
+        } catch (IllegalStateException wrapped) {
+            assertSame(sealed, wrapped.getCause());
+        }
+
+        GenerationFailures.rethrowEngineFailure(new IllegalArgumentException("malformed object"));
+    }
+}

@@ -1,0 +1,46 @@
+package art.arcane.iris.generation.hydrology.raster;
+
+import art.arcane.iris.generation.hydrology.plan.HydrologySettings;
+import art.arcane.iris.generation.hydrology.plan.IndexedWindow;
+import art.arcane.iris.generation.hydrology.plan.RegionKey;
+import art.arcane.iris.generation.hydrology.plan.RegionPlan;
+import art.arcane.iris.generation.hydrology.water.HydrologyTier;
+
+import java.util.List;
+import java.util.Objects;
+
+public final class ChunkRasterizer {
+    private static final int CHUNK = 16;
+    private static final int CANDIDATE_HALO = 48;
+
+    private final HydrologySettings settings;
+    private final ChannelFluids channelFluids;
+    private final int halo;
+
+    public ChunkRasterizer(HydrologySettings settings, ChannelFluids channelFluids) {
+        this.settings = Objects.requireNonNull(settings, "settings");
+        this.channelFluids = Objects.requireNonNull(channelFluids, "channelFluids");
+        float widest = settings.underground().seaInlets().mouthHalfWidth().max();
+        for (HydrologyTier tier : settings.tiers()) {
+            widest = Math.max(widest, tier.maxHalfWidth());
+        }
+        int reach = 1 + Math.max(ChunkWaterRaster.MAX_SHORE_DISTANCE, settings.ponds().shore().taper()) + (int) Math.ceil(widest);
+        this.halo = Math.max(CANDIDATE_HALO, reach);
+    }
+
+    public static List<RegionKey> lakeRegions(int chunkX, int chunkZ) {
+        int halo = RiffleProfile.RADIUS + 1;
+        return RegionKey.lakeOwners(chunkX * CHUNK - halo, chunkZ * CHUNK - halo,
+                chunkX * CHUNK + CHUNK - 1 + halo, chunkZ * CHUNK + CHUNK - 1 + halo);
+    }
+
+    public ChunkWaterRaster rasterize(int chunkX, int chunkZ, NaturalHeights naturalHeight, List<IndexedWindow> windows,
+                                      List<RegionPlan> lakeRegionPlans) {
+        Objects.requireNonNull(naturalHeight, "naturalHeight");
+        ChunkFeatures features = ChunkFeatures.gather(settings, chunkX, chunkZ, halo, windows, lakeRegionPlans, lakeRegions(chunkX, chunkZ));
+        if (features.inert()) {
+            return ChunkWaterRaster.EMPTY;
+        }
+        return new RasterComposer(settings, features, channelFluids, chunkX, chunkZ).compose(naturalHeight);
+    }
+}

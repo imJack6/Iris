@@ -1,0 +1,108 @@
+{
+  "global": [
+    {
+      "pattern": "new MobSpawnSettings\\.SpawnerData\\((EntityTypes\\.[A-Z_]+), UniformInt\\.of\\((\\d+), (\\d+)\\)\\)",
+      "replacement": "new MobSpawnSettings.SpawnerData($1, $2, $3)"
+    }
+  ],
+  "files": {
+    "art/arcane/volmlib/nativelib/minecraft26_2/fabric/NativeFabricBiomeDefinitionTest.java": [
+      {
+        "pattern": "import net\\.minecraft\\.world\\.level\\.levelgen\\.carver\\.WorldCarver;",
+        "replacement": "import net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver;"
+      },
+      {
+        "pattern": "import net\\.minecraft\\.world\\.level\\.levelgen\\.feature\\.Feature;",
+        "replacement": "import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;"
+      },
+      {
+        "pattern": "mock\\(Feature\\.class\\)",
+        "replacement": "mock(ConfiguredFeature.class)"
+      },
+      {
+        "pattern": "MappedRegistry<WorldCarver> carvers = new MappedRegistry<>\\(Registries\\.CARVER,",
+        "replacement": "MappedRegistry<ConfiguredWorldCarver<?>> carvers = new MappedRegistry<>(Registries.CONFIGURED_CARVER,"
+      },
+      {
+        "pattern": "\\\\\"features\\\\\":\\[\\]\\}\";",
+        "replacement": "\\\\\"features\\\\\":[],\\\\\"spawners\\\\\":{},\\\\\"spawn_costs\\\\\":{}}\";"
+      }
+    ],
+    "art/arcane/volmlib/nativelib/minecraft26_2/modded/NativeWorldgenScanTest.java": [
+      {
+        "pattern": "import net\\.minecraft\\.world\\.level\\.levelgen\\.carver\\.WorldCarver;",
+        "replacement": "import net.minecraft.world.level.levelgen.carver.ConfiguredWorldCarver;"
+      },
+      {
+        "pattern": "import net\\.minecraft\\.world\\.level\\.levelgen\\.feature\\.Feature;",
+        "replacement": "import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;"
+      },
+      {
+        "pattern": "mock\\(Feature\\.class\\)",
+        "replacement": "mock(ConfiguredFeature.class)"
+      },
+      {
+        "pattern": "MappedRegistry<WorldCarver> carvers = new MappedRegistry<>\\(Registries\\.CARVER,",
+        "replacement": "MappedRegistry<ConfiguredWorldCarver<?>> carvers = new MappedRegistry<>(Registries.CONFIGURED_CARVER,"
+      },
+      {
+        "pattern": "\\]\\]\\}\";",
+        "replacement": "]],\\\\\"spawners\\\\\":{},\\\\\"spawn_costs\\\\\":{}}\";"
+      }
+    ],
+    "art/arcane/iris/modded/ModdedTileParityTest.java": [
+      {
+        "pattern": "import net\\.minecraft\\.world\\.level\\.block\\.entity\\.SignTextSlot;\\n",
+        "replacement": ""
+      },
+      {
+        "pattern": "\\.getText\\(SignTextSlot\\.FRONT\\)",
+        "replacement": ".getFrontText()"
+      },
+      {
+        "pattern": "\\.getText\\(SignTextSlot\\.BACK\\)",
+        "replacement": ".getBackText()"
+      },
+      {
+        "pattern": "\\.getMessages\\(false\\)\\.get\\((\\d+)\\)",
+        "replacement": ".getMessages(false)[$1]"
+      }
+    ],
+    "art/arcane/iris/modded/ModdedWaterEntitySpawnTest.java": [
+      {
+        "pattern": "(?ms)^        BuiltInRegistries\\.BLOCK\\.prepareTagReload\\(new TagLoader\\.LoadResult<>.*?\\)\\)\\)\\)\\.apply\\(\\);\\n",
+        "replacement": ""
+      }
+    ],
+    "art/arcane/iris/modded/ModdedPlacementContainmentTest.java": [
+      {
+        "pattern": "manager\\.startsForStructure\\(anyInt\\(\\), anyInt\\(\\), any\\(Structure\\.class\\)\\)",
+        "replacement": "manager.startsForStructure(any(SectionPos.class), any(Structure.class))"
+      },
+      {
+        "pattern": "import net\\.minecraft\\.core\\.Holder;",
+        "replacement": "import net.minecraft.core.Holder;\nimport net.minecraft.core.SectionPos;"
+      },
+      {
+        "pattern": "import net\\.minecraft\\.world\\.level\\.levelgen\\.feature\\.Feature;",
+        "replacement": "import net.minecraft.world.level.levelgen.feature.ConfiguredFeature;\nimport net.minecraft.world.level.levelgen.feature.Feature;\nimport net.minecraft.world.level.levelgen.feature.configurations.NoneFeatureConfiguration;"
+      },
+      {
+        "pattern": "Feature feature = mock\\(Feature\\.class\\);",
+        "replacement": "Feature<NoneFeatureConfiguration> feature = mock(Feature.class);"
+      },
+      {
+        "pattern": "when\\(feature\\.place\\(any\\(\\), any\\(\\), any\\(\\), any\\(\\)\\)\\)",
+        "replacement": "when(feature.place(any(), any(), any(), any(), any()))"
+      },
+      {
+        "pattern": "placement\\.accept\\(invocation\\.getArgument\\(0\\)\\);",
+        "replacement": "placement.accept(invocation.getArgument(1));"
+      },
+      {
+        "pattern": "return new PlacedFeature\\(Holder\\.direct\\(feature\\), List\\.of\\(\\)\\);",
+        "replacement": "return new PlacedFeature(Holder.direct(new ConfiguredFeature<>(feature, NoneFeatureConfiguration.INSTANCE)), List.of());"
+      }
+    ]
+  }
+}

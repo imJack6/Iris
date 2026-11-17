@@ -1,0 +1,300 @@
+package art.arcane.iris.generation.stage;
+
+import art.arcane.iris.generation.runtime.IrisComplex;
+import art.arcane.iris.generation.runtime.Engine;
+import art.arcane.iris.generation.terrain.Terrain3DColumn;
+import art.arcane.iris.world.history.BoundaryColumnGeometry;
+import art.arcane.iris.world.history.BoundaryGeometryInfluence;
+import art.arcane.iris.world.history.NativeTerrainReceipt;
+import art.arcane.iris.world.history.SavedTerrainChunk;
+import art.arcane.iris.world.history.TerrainBoundarySignature;
+import art.arcane.iris.world.history.TransitionGenerationPlan;
+import art.arcane.iris.spi.IrisPlatform;
+import art.arcane.iris.spi.IrisPlatforms;
+import art.arcane.volmlib.nativelib.terrain.NativeBiome;
+import art.arcane.volmlib.nativelib.terrain.NativeBlockState;
+import art.arcane.iris.spi.PlatformRegistries;
+import art.arcane.iris.testsupport.PlatformLeakGuard;
+import art.arcane.iris.generation.context.ChunkContext;
+import art.arcane.volmlib.util.hunk.Hunk;
+import art.arcane.volmlib.util.stream.ProceduralStream;
+import org.junit.After;
+import org.junit.Before;
+import org.junit.ClassRule;
+import org.junit.Test;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.OptionalInt;
+
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+public class IrisTransitionGeometryActuatorTest {
+    @ClassRule
+    public static final PlatformLeakGuard PLATFORM_GUARD = PlatformLeakGuard.clean();
+
+    private IrisPlatform previous;
+    private PlatformRegistries registries;
+    private NativeBlockState stone;
+    private NativeBlockState air;
+
+    @Before
+    public void bind() {
+        previous = IrisPlatforms.isBound() ? IrisPlatforms.get() : null;
+        IrisPlatforms.unbind();
+        registries = mock(PlatformRegistries.class);
+        stone = state("minecraft:stone", false);
+        air = state("minecraft:air", true);
+        when(registries.air()).thenReturn(air);
+        when(registries.blockOrNull("minecraft:stone")).thenReturn(stone);
+        when(registries.blockOrNull("minecraft:air")).thenReturn(air);
+        IrisPlatform platform = mock(IrisPlatform.class);
+        when(platform.registries()).thenReturn(registries);
+        IrisPlatforms.bind(platform);
+    }
+
+    @After
+    public void restore() {
+        IrisPlatforms.unbind();
+        if (previous != null) {
+            IrisPlatforms.bind(previous);
+        }
+    }
+
+    @Test
+    public void boundaryReceiptRetainsCustomKeyAndCarrierPhysics() throws Exception {
+        String key = "itemsadder:rocks/ruby_ore";
+        NativeBlockState carrier = state("minecraft:oak_slab[type=bottom,waterlogged=true]", false);
+        when(carrier.isWaterLogged()).thenReturn(true);
+        NativeBlockState custom = state(key, false);
+        when(custom.isCustom()).thenReturn(true);
+        when(custom.placementBaseState()).thenReturn(carrier);
+        Hunk<NativeBlockState> blocks = filled();
+        blocks.setRaw(0, 3, 0, custom);
+        Hunk<NativeBiome> biomes = Hunk.newArrayHunk(16, 16, 16);
+        NativeBiome biome = mock(NativeBiome.class);
+        when(biome.key()).thenReturn("minecraft:plains");
+        biomes.fill(biome);
+        ChunkContext context = mock(ChunkContext.class);
+        IrisComplex complex = mock(IrisComplex.class);
+        when(complex.getWaterHeadStream()).thenReturn(ProceduralStream.ofDouble((x, z) -> 3D));
+        when(context.getComplex()).thenReturn(complex);
+        when(context.getRoundedHeight(anyInt(), anyInt())).thenReturn(3);
+
+        SavedTerrainChunk captured = IrisTransitionGeometryActuator.capture(0, 0, blocks, biomes, 0, context, true);
+        byte[] encoded = NativeTerrainReceipt.encode(captured, 7, "epoch");
+        SavedTerrainChunk restored = NativeTerrainReceipt.decode(encoded, "minecraft:noise").terrain();
+        BoundaryColumnGeometry.Voxel voxel = restored.column(0, 0).geometry().voxelAt(3);
+
+        assertEquals(key, voxel.stateKey());
+        assertEquals(BoundaryColumnGeometry.Phase.SOLID, voxel.phase());
+        assertEquals("minecraft:water[level=0]", voxel.fluidStateKey());
+        assertTrue(voxel.protectedContent());
+    }
+
+    @Test
+    public void appliesCaveAndIslandGeometryThenUpdatesDecorationHeight() {
+        Hunk<NativeBlockState> blocks = filled();
+        ChunkContext context = context("minecraft:stone");
+        Engine engine = mock(Engine.class);
+
+        new IrisTransitionGeometryActuator(engine).generate(16, 0, blocks,
+                Hunk.newArrayHunk(16, 16, 16), false, context);
+
+        assertSame(stone, blocks.getRaw(0, 0, 0));
+        assertSame(air, blocks.getRaw(0, 1, 0));
+        assertSame(air, blocks.getRaw(0, 2, 0));
+        assertSame(stone, blocks.getRaw(0, 3, 0));
+        assertSame(air, blocks.getRaw(0, 4, 0));
+        verify(context).setTerrainHeight(0, 0, 3);
+        verify(context).setTransitionTerrain(0, 0,
+                Terrain3DColumn.fromOccupancy(3, 16, y -> y == 0 || y == 3), -1);
+    }
+
+    @Test
+    public void usesNativeMaterialWhenHistoricalPaletteIsUnavailable() {
+        Engine engine = mock(Engine.class);
+        ChunkContext context = context("removed:stone");
+        Hunk<NativeBlockState> blocks = filled();
+        Hunk<NativeBiome> biomes = Hunk.newArrayHunk(16, 16, 16);
+
+        new IrisTransitionGeometryActuator(engine).generate(16, 0, blocks, biomes, false, context);
+
+        assertSame(stone, blocks.getRaw(0, 3, 0));
+        assertSame(air, blocks.getRaw(0, 2, 0));
+    }
+
+    @Test
+    public void preservesTheActualBlendedSurfaceWaterHeight() {
+        NativeBlockState water = state("minecraft:water[level=0]", false);
+        when(water.isSolid()).thenReturn(false);
+        when(water.isFluid()).thenReturn(true);
+        when(registries.blockOrNull(water.key())).thenReturn(water);
+        ChunkContext context = context("minecraft:stone", 6);
+        Hunk<NativeBlockState> blocks = filled();
+        for (int y = 4; y <= 6; y++) {
+            blocks.setRaw(0, y, 0, water);
+        }
+
+        new IrisTransitionGeometryActuator(mock(Engine.class)).generate(16, 0, blocks,
+                Hunk.newArrayHunk(16, 16, 16), false, context);
+
+        assertSame(water, blocks.getRaw(0, 4, 0));
+        assertSame(water, blocks.getRaw(0, 6, 0));
+        assertSame(air, blocks.getRaw(0, 7, 0));
+        verify(context).setTransitionTerrain(0, 0,
+                Terrain3DColumn.fromOccupancy(3, 16, y -> y == 0 || y == 3), 6);
+    }
+
+    @Test
+    public void boundaryReceiptRecordsSeaLayerCapsAtTheWaterHeadAboveTheSeabed() throws Exception {
+        NativeBlockState water = fluid("minecraft:water[level=0]");
+        NativeBlockState ice = state("minecraft:ice", false);
+        Hunk<NativeBlockState> blocks = filled();
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                int head = z == 15 ? 6 : 12;
+                int capBottom = z == 0 ? 9 : z == 15 ? 4 : head + 1;
+                for (int y = 4; y < 16; y++) {
+                    blocks.setRaw(x, y, z, y > head ? air : y >= capBottom ? ice : water);
+                }
+            }
+        }
+        ChunkContext context = mock(ChunkContext.class);
+        IrisComplex complex = mock(IrisComplex.class);
+        when(complex.getWaterHeadStream()).thenReturn(ProceduralStream.ofDouble((x, z) -> z == 15D ? 6D : 12D));
+        when(context.getComplex()).thenReturn(complex);
+        when(context.getRoundedHeight(anyInt(), anyInt())).thenReturn(3);
+
+        SavedTerrainChunk captured = IrisTransitionGeometryActuator.capture(0, 0, blocks, biomes(), 0, context, true);
+        SavedTerrainChunk restored = NativeTerrainReceipt.decode(NativeTerrainReceipt.encode(captured, 7, "epoch"),
+                "minecraft:noise").terrain();
+
+        assertWaterColumn(restored.column(0, 0), 3, 12);
+        assertWaterColumn(restored.column(0, 15), 3, 6);
+        assertWaterColumn(restored.column(0, 7), 3, 12);
+    }
+
+    @Test
+    public void transitionKeepsSeaLayerCapsAtTheWaterHeadForDecoration() {
+        NativeBlockState water = fluid("minecraft:water[level=0]");
+        NativeBlockState ice = state("minecraft:ice", false);
+        when(registries.blockOrNull(ice.key())).thenReturn(ice);
+        for (int capBottom : new int[]{9, 4}) {
+            ArrayList<BoundaryColumnGeometry.Voxel> historical = new ArrayList<>(16);
+            for (int y = 0; y < 16; y++) {
+                historical.add(y <= 3 ? voxel("minecraft:stone", BoundaryColumnGeometry.Phase.SOLID, "")
+                        : y > 12 ? voxel("minecraft:air", BoundaryColumnGeometry.Phase.AIR, "")
+                        : y >= capBottom ? voxel(ice.key(), BoundaryColumnGeometry.Phase.SOLID, "")
+                        : voxel(water.key(), BoundaryColumnGeometry.Phase.FLUID, water.key()));
+            }
+            ChunkContext context = context(BoundaryColumnGeometry.fromVoxels(0, historical), 12D);
+            Hunk<NativeBlockState> blocks = filled();
+            for (int x = 0; x < 16; x++) {
+                for (int z = 0; z < 16; z++) {
+                    for (int y = 1; y < 16; y++) {
+                        blocks.setRaw(x, y, z, y < 3 || y > 12 ? air : y == 3 ? stone : y >= capBottom ? ice : water);
+                    }
+                }
+            }
+
+            new IrisTransitionGeometryActuator(mock(Engine.class)).generate(16, 0, blocks,
+                    Hunk.newArrayHunk(16, 16, 16), false, context);
+
+            assertSame(stone, blocks.getRaw(0, 2, 0));
+            assertSame(ice, blocks.getRaw(0, 12, 0));
+            assertSame(capBottom == 4 ? ice : water, blocks.getRaw(0, 4, 0));
+            assertSame(air, blocks.getRaw(0, 13, 0));
+            int iceBottom = capBottom;
+            verify(context).setTerrainHeight(0, 0, 3);
+            verify(context).setTransitionTerrain(0, 0,
+                    Terrain3DColumn.fromOccupancy(3, 16, y -> y <= 3 || y >= iceBottom && y <= 12), 12);
+        }
+    }
+
+    private static void assertWaterColumn(TerrainBoundarySignature signature, int seabed, int waterSurface) {
+        assertEquals(seabed, signature.oceanFloorHeight());
+        assertEquals(OptionalInt.of(waterSurface), signature.fluidHeight());
+        assertEquals(waterSurface, signature.surfaceHeight());
+    }
+
+    private static BoundaryColumnGeometry.Voxel voxel(String key, BoundaryColumnGeometry.Phase phase, String fluid) {
+        return new BoundaryColumnGeometry.Voxel(key, phase, fluid, false);
+    }
+
+    private NativeBlockState fluid(String key) {
+        NativeBlockState state = state(key, false);
+        when(state.isSolid()).thenReturn(false);
+        when(state.isFluid()).thenReturn(true);
+        when(registries.blockOrNull(key)).thenReturn(state);
+        return state;
+    }
+
+    private static Hunk<NativeBiome> biomes() {
+        Hunk<NativeBiome> biomes = Hunk.newArrayHunk(16, 16, 16);
+        NativeBiome biome = mock(NativeBiome.class);
+        when(biome.key()).thenReturn("minecraft:frozen_ocean");
+        biomes.fill(biome);
+        return biomes;
+    }
+
+    private ChunkContext context(String material) {
+        return context(material, 3);
+    }
+
+    private ChunkContext context(String material, int fluidHeight) {
+        ArrayList<BoundaryColumnGeometry.Voxel> voxels = new ArrayList<>(16);
+        for (int y = 0; y < 16; y++) {
+            boolean solid = y == 0 || y == 3;
+            boolean fluid = y > 3 && y <= fluidHeight;
+            voxels.add(new BoundaryColumnGeometry.Voxel(solid ? material : fluid ? "minecraft:water[level=0]" : "minecraft:air",
+                    solid ? BoundaryColumnGeometry.Phase.SOLID : fluid ? BoundaryColumnGeometry.Phase.FLUID : BoundaryColumnGeometry.Phase.AIR,
+                    fluid ? "minecraft:water[level=0]" : "", false));
+        }
+        return context(BoundaryColumnGeometry.fromVoxels(0, voxels), 3D);
+    }
+
+    private ChunkContext context(BoundaryColumnGeometry historical, double waterHead) {
+        BoundaryGeometryInfluence influence = new BoundaryGeometryInfluence(0D, 0D,
+                List.of(new BoundaryGeometryInfluence.Contribution(historical, 1D)));
+        TransitionGenerationPlan plan = mock(TransitionGenerationPlan.class);
+        when(plan.geometryAt(anyInt(), anyInt())).thenReturn(influence);
+        when(plan.hasTransitionAtChunk(anyInt(), anyInt())).thenReturn(true);
+        TransitionGenerationPlan.TerrainSample sample = mock(TransitionGenerationPlan.TerrainSample.class);
+        when(sample.historicalOceanFloorHeight()).thenReturn(3D);
+        when(plan.terrainSampleAt(anyInt(), anyInt())).thenReturn(sample);
+        IrisComplex complex = mock(IrisComplex.class);
+        when(complex.getTransitionGenerationPlan()).thenReturn(plan);
+        when(complex.getWaterHeadStream()).thenReturn(ProceduralStream.ofDouble((x, z) -> waterHead));
+        ChunkContext context = mock(ChunkContext.class);
+        when(context.getComplex()).thenReturn(complex);
+        when(context.getRoundedHeight(anyInt(), anyInt())).thenReturn(3);
+        return context;
+    }
+
+    private Hunk<NativeBlockState> filled() {
+        Hunk<NativeBlockState> blocks = Hunk.newArrayHunk(16, 16, 16);
+        for (int x = 0; x < 16; x++) {
+            for (int z = 0; z < 16; z++) {
+                for (int y = 0; y < 16; y++) {
+                    blocks.setRaw(x, y, z, stone);
+                }
+            }
+        }
+        return blocks;
+    }
+
+    private static NativeBlockState state(String key, boolean isAir) {
+        NativeBlockState state = mock(NativeBlockState.class);
+        when(state.key()).thenReturn(key);
+        when(state.isAir()).thenReturn(isAir);
+        when(state.isSolid()).thenReturn(!isAir);
+        return state;
+    }
+}

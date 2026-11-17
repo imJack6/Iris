@@ -1,0 +1,125 @@
+/*
+ * Iris is a World Generator for Minecraft Servers
+ * Copyright (c) 2026 Arcane Arts (Volmit Software)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+package art.arcane.iris.modded.command;
+
+import art.arcane.iris.studio.view.GuiMarker;
+import art.arcane.iris.studio.view.GuiOverlay;
+import art.arcane.iris.studio.view.OpenerPosition;
+import art.arcane.iris.generation.runtime.Engine;
+import art.arcane.iris.modded.ModdedIrisLog;
+import art.arcane.iris.modded.ModdedTeleportDeadline;
+import art.arcane.iris.world.IrisWorld;
+import art.arcane.volmlib.nativelib.minecraft26_2.modded.NativeModdedServer;
+import art.arcane.volmlib.nativelib.minecraft26_2.modded.NativeProtocolPlayer;
+import art.arcane.volmlib.nativelib.terrain.NativeWorld;
+import art.arcane.volmlib.nativelib.view.WorldView;
+
+import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Consumer;
+
+public final class ModdedVisionOverlay implements GuiOverlay {
+    private final WorldView world;
+    private final Engine engine;
+    private final UUID opener;
+
+    public ModdedVisionOverlay(Context context) {
+        world = context.world();
+        engine = context.engine();
+        opener = context.opener();
+    }
+
+    // WorldView doesn't report which way a player faces, so their markers all face south.
+    @Override
+    public List<GuiMarker> players() {
+        return world.players().stream()
+                .map(player -> GuiMarker.player(player.label(), player.worldX(), player.worldZ(), 0F))
+                .toList();
+    }
+
+    @Override
+    public void requestEntities(Consumer<List<GuiMarker>> sink) {
+        world.requestEntities(entities -> sink.accept(entities.stream()
+                .map(entity -> GuiMarker.entity(entity.label(), entity.worldX(), entity.worldY(), entity.worldZ(),
+                        entity.health(), entity.maxHealth()))
+                .toList()));
+    }
+
+    @Override
+    public void requestOpenerPosition(Consumer<OpenerPosition> sink) {
+        if (opener == null) {
+            sink.accept(OpenerPosition.OFFLINE);
+            return;
+        }
+        try {
+            world.execute(() -> sink.accept(openerPosition()));
+        } catch (RejectedExecutionException failure) {
+            sink.accept(OpenerPosition.OFFLINE);
+        }
+    }
+
+    @Override
+    public void teleport(double worldX, double worldZ) {
+        int blockX = (int) Math.floor(worldX);
+        int blockZ = (int) Math.floor(worldZ);
+        world.execute(() -> {
+            int surfaceY = engine.getMinHeight() + engine.getHeight(blockX, blockZ, false) + 2;
+            Optional<WorldView.TeleportOperation> operation = world.teleport(opener,
+                    new WorldView.Destination(blockX + 0.5D, surfaceY, blockZ + 0.5D, ModdedTeleportDeadline.fromNow()));
+            if (operation.isEmpty()) {
+                return;
+            }
+            WorldView.TeleportOperation teleport = operation.get();
+            teleport.result().whenComplete((success, failure) -> {
+                if (failure != null) {
+                    ModdedIrisLog.error("Iris Vision teleport failed for {} at {},{}",
+                            teleport.playerId(), blockX, blockZ, failure);
+                } else if (!Boolean.TRUE.equals(success)) {
+                    ModdedIrisLog.warn("Iris Vision teleport did not complete for {} at {},{}",
+                            teleport.playerId(), blockX, blockZ);
+                }
+            });
+        });
+    }
+
+    private OpenerPosition openerPosition() {
+        IrisWorld target = engine.getWorld();
+        if (target == null || engine.isClosing() || engine.isClosed()) {
+            return OpenerPosition.OFFLINE;
+        }
+        NativeWorld level = target.platformWorld();
+        if (level == null) {
+            return OpenerPosition.OFFLINE;
+        }
+        NativeProtocolPlayer player = NativeModdedServer.forWorld(level).player(opener);
+        if (player == null || !player.connected()) {
+            return OpenerPosition.OFFLINE;
+        }
+        if (!player.inWorld(level)) {
+            return OpenerPosition.IN_OTHER_WORLD;
+        }
+        return OpenerPosition.inWorld(player.x(), player.y(), player.z());
+    }
+
+    public record Context(WorldView world, Engine engine, UUID opener) {
+    }
+
+}

@@ -1,0 +1,61 @@
+package art.arcane.iris.generation.hydrology.config;
+
+import art.arcane.iris.pack.schema.annotation.ArrayType;
+import art.arcane.iris.pack.schema.annotation.MaxNumber;
+import art.arcane.iris.pack.schema.annotation.MinNumber;
+import art.arcane.iris.pack.schema.annotation.Required;
+import art.arcane.volmlib.util.collection.KList;
+import art.arcane.volmlib.util.documentation.Description;
+import lombok.Data;
+import lombok.NoArgsConstructor;
+import lombok.experimental.Accessors;
+
+@Accessors(chain = true)
+@NoArgsConstructor
+@Description("Standing water on the floors of carved caves. A pool fills a dip in the cave floor only up to the highest level the surrounding rock holds.")
+@Data
+public class IrisCavePools {
+    @Description("Fills dips in cave floors with standing water.")
+    private boolean enabled = true;
+
+    @MinNumber(0)
+    @MaxNumber(8)
+    @Description("Candidate pool sites per chunk.")
+    private double density = 0.15D;
+
+    @MinNumber(1)
+    @MaxNumber(961)
+    @Description("Smallest pool surface in square blocks.")
+    private int minArea = 6;
+
+    @MinNumber(1)
+    @MaxNumber(961)
+    @Description("Largest pool surface in square blocks.")
+    private int maxArea = 400;
+
+    @MinNumber(1)
+    @MaxNumber(16)
+    @Description("Deepest pool in blocks.")
+    private int maxDepth = 4;
+
+    @MinNumber(1)
+    @MaxNumber(15)
+    @Description("Half-size in blocks of the square box, centered on the site column, inside which a pool settles and spreads, at most 15, so a pool stays within one chunk of the chunk that holds its site.")
+    private int radius = 15;
+
+    @ArrayType(type = Integer.class, min = 2)
+    @Description("Blocks the pool surface sits below the highest level the cave holds, written as [min, max].")
+    private KList<Integer> freeboard = new KList<>(0, 1);
+
+    @Required
+    @Description("Name of the fluid profile that fills cave pools. The hydrology policy fluid of the cave biome at the pool replaces it, then that of its region, then that of the dimension. A surface biome's policy never fills cave pools.")
+    private String fluid = "water";
+
+    @Description("Name of the fluid profile that fills pools at or below deepFluidMaxY. Unset keeps the same fluid at every depth. A hydrology policy that names a fluid still replaces it.")
+    private String deepFluid;
+
+    @MinNumber(-2032)
+    @MaxNumber(2031)
+    @Description("Highest world Y that deepFluid fills. No pool crosses this height: a pool rising from below stops at it.")
+    private int deepFluidMaxY = -128;
+}

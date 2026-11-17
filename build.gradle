@@ -1,0 +1,1027 @@
+import art.arcane.volmit.packaging.PackedJar
+import art.arcane.volmit.packaging.PackagingMode
+import art.arcane.volmit.packaging.NativeDevelopmentTargets
+import io.papermc.paperweight.userdev.PaperweightUser
+import io.papermc.paperweight.userdev.PaperweightUserDependenciesExtension
+import io.papermc.paperweight.userdev.PaperweightUserExtension
+import org.gradle.api.artifacts.component.ComponentIdentifier
+import org.gradle.api.plugins.JavaPluginExtension
+import org.gradle.api.provider.Provider
+import org.gradle.jvm.toolchain.JavaLauncher
+import org.gradle.jvm.toolchain.JavaToolchainService
+import org.gradle.api.file.FileTree
+import org.gradle.api.plugins.JavaPlugin
+import org.gradle.api.initialization.IncludedBuild
+import org.gradle.api.tasks.Copy
+import org.gradle.api.tasks.compile.JavaCompile
+import org.gradle.jvm.tasks.Jar
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+
+/*
+ * Iris is a World Generator for Minecraft Bukkit Servers
+ * Copyright (c) 2021 Arcane Arts (Volmit Software)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ */
+
+buildscript {
+    repositories {
+        mavenCentral()
+        maven { url = uri('https://jitpack.io') }
+    }
+    dependencies {
+        classpath('com.github.VolmitSoftware.VolmLib:packaging:master-SNAPSHOT')
+    }
+}
+
+plugins {
+    id 'java'
+    id 'java-library'
+}
+
+apply plugin: 'art.arcane.volmit-packaging'
+apply from: file('gradle/runtime-relocations.gradle')
+apply from: file('gradle/volmlib-stamp.gradle')
+apply from: file('gradle/language-source.gradle')
+
+group = 'art.arcane'
+version = providers.gradleProperty('irisVersion').getOrElse('4.3.8')
+
+project(':core') {
+    group = 'art.arcane'
+    version = rootProject.version
+}
+apply from: file('gradle/mod-target.gradle')
+
+String minecraftVersion = providers.gradleProperty('minecraftVersion').getOrElse('26.3')
+// The Bukkit jar retains 26.1.2 and 26.2 alongside 26.3.
+String bukkitMinecraftRange = providers.gradleProperty('bukkitMinecraftRange').getOrElse('26.1.2-26.3')
+String fabricLoaderVersion = providers.gradleProperty('fabricLoaderVersion').getOrElse(irisModTarget.fabricLoader.toString())
+String forgeVersion = providers.gradleProperty('forgeVersion').getOrElse(irisModTarget.forge.toString())
+String neoForgeVersion = providers.gradleProperty('neoForgeVersion').getOrElse(irisModTarget.neoForge.toString())
+String volmLibShared = 'com.github.VolmitSoftware.VolmLib:volmlib-shared:master-SNAPSHOT'
+File localVolmLibCheckout = (File) gradle.extensions.extraProperties.get('volmLibDirectory')
+IncludedBuild localVolmLibBuild = localVolmLibCheckout == null ? null : gradle.includedBuilds.find { IncludedBuild includedBuild ->
+    includedBuild.projectDir.canonicalFile == localVolmLibCheckout.canonicalFile
+}
+Map<String, String> volmLibStamp = (Map<String, String>) gradle.extensions.extraProperties.get('volmLibStamp')
+Closure<String> loaderDisplayVersion = { String loaderVersion ->
+    String coordinatePrefix = "${minecraftVersion}-"
+    if (loaderVersion.startsWith(coordinatePrefix)) {
+        return loaderVersion.substring(coordinatePrefix.length())
+    }
+
+    return loaderVersion
+}
+Closure<String> irisArtifactName = { String platform, String targetVersion ->
+    return "Iris v${project.version} [${platform}] ${targetVersion}.jar"
+}
+String bukkitArtifactName = irisArtifactName('CraftBukkit', bukkitMinecraftRange)
+Map<String, String> runtimeDownloadRelocations = (Map<String, String>) ext.runtimeDownloadRelocations
+List<String> runtimeDownloadedPrefixes = (List<String>) ext.runtimeDownloadedPrefixes
+Map<String, String> languageSourceManifest = (Map<String, String>) ext.languageSourceManifest
+apply plugin: ApiGenerator
+
+List<String> nmsBindings = ['v26_2_R1', 'v26_3_R1']
+ext.nativeDevelopmentAdapters = nmsBindings
+nmsBindings.each { String key ->
+    project(":adapters:bukkit:nms:${key}") {
+        apply plugin: JavaPlugin
+        apply plugin: PaperweightUser
+        if (localVolmLibBuild != null) {
+            tasks.named('paperweightUserdevSetup').configure {
+                dependsOn(localVolmLibBuild.task(":native:${key}:paperweightUserdevSetup"))
+                if (key == 'v26_2_R1') {
+                    dependsOn(localVolmLibBuild.task(':native-common:paperweightUserdevSetup'))
+                }
+            }
+        }
+        NativeDevelopmentTargets.Target nativeTarget = NativeDevelopmentTargets.require(key)
+        dependencies.extensions.getByType(PaperweightUserDependenciesExtension)
+            .paperDevBundle(nativeTarget.paperBundle())
+        JavaPluginExtension javaExtension = extensions.getByType(JavaPluginExtension)
+        javaExtension.toolchain.languageVersion.set(JavaLanguageVersion.of(nativeTarget.javaVersion()))
+        JavaToolchainService nativeToolchains = extensions.getByType(JavaToolchainService)
+        extensions.configure(PaperweightUserExtension) { PaperweightUserExtension extension ->
+            extension.javaLauncher.set(nativeToolchains.launcherFor(javaExtension.toolchain))
+        }
+
+        dependencies {
+            implementation("com.github.VolmitSoftware.VolmLib:native-${key}:master-SNAPSHOT") {
+                transitive = false
+            }
+            compileOnly(project(':core'))
+            compileOnly(volmLibShared) {
+                transitive = false
+            }
+            compileOnly(rootProject.libs.annotations)
+            compileOnly(rootProject.libs.byteBuddy.core)
+            testImplementation('junit:junit:4.13.2')
+            testImplementation(rootProject.libs.mockito.core)
+            if (key == 'v26_3_R1') {
+                testImplementation(project(':probe'))
+            }
+            testImplementation(project(':core'))
+            testImplementation(testFixtures(project(':core')))
+            testImplementation('com.github.VolmitSoftware.VolmLib:native-common:master-SNAPSHOT') {
+                transitive = false
+            }
+            testCompileOnly(volmLibShared) {
+                transitive = false
+            }
+            testRuntimeOnly(project(':core'))
+            testRuntimeOnly(rootProject.libs.caffeine)
+        }
+    }
+}
+
+def included = configurations.create('included')
+def nativeRuntime = configurations.create('nativeRuntime')
+def nativeRuntimeOutput = layout.buildDirectory.dir('generated/native-runtime')
+def nativeRuntimeRules = layout.buildDirectory.file('generated/native-runtime-keep.pro')
+List<String> nativeRuntimeModules = ['native-common'] + nmsBindings.collect { String adapter -> 'native-' + adapter }
+dependencies {
+    nativeRuntimeModules.each { String module ->
+        add('nativeRuntime', "com.github.VolmitSoftware.VolmLib:${module}:master-SNAPSHOT") {
+            transitive = false
+        }
+    }
+}
+// The natives PackedJar embeds are the single source for the runtime manifest, the reachability roots and
+// the ProGuard keep rules, so the shrinker can never prune against a different provider build.
+Closure<Map<String, File>> embeddedNatives = { ->
+    Map<ComponentIdentifier, File> resolved = new LinkedHashMap<>()
+    nativeRuntime.incoming.artifacts.artifacts.each { artifact ->
+        resolved.put(artifact.id.componentIdentifier, artifact.file)
+    }
+    return PackedJar.resolveNativeArtifacts(resolved)
+}
+def generateNativeRuntime = tasks.register('generateNativeRuntime') {
+    inputs.files(nativeRuntime)
+    inputs.property('modules', nativeRuntimeModules)
+    outputs.dir(nativeRuntimeOutput)
+    outputs.file(nativeRuntimeRules)
+    doLast {
+        NativeRuntimeArtifacts.generate(embeddedNatives(), nativeRuntimeModules,
+            nativeRuntimeOutput.get().asFile, nativeRuntimeRules.get().asFile)
+    }
+}
+// The Bukkit jar leaves VolmLib's noise natives out and pins them instead; NoiseNatives downloads the
+// platform's binary at startup and verifies it against this manifest.
+def noiseNativesOutput = layout.buildDirectory.dir('generated/noise-natives')
+def generateNoiseNatives = tasks.register('generateNoiseNatives') {
+    inputs.files(included)
+    outputs.dir(noiseNativesOutput)
+    doLast {
+        File manifest = new File(noiseNativesOutput.get().asFile, NoiseNativeArtifacts.MANIFEST)
+        NoiseNativeArtifacts.generate(included.resolve(), localVolmLibCheckout, manifest).each { String warning ->
+            logger.warn(warning)
+        }
+    }
+}
+def jarJar = configurations.create('jarJar')
+dependencies {
+    add('included', project(path: ':core', configuration: 'shadow'))
+    add('included', project(path: ':adapters:bukkit:plugin', configuration: 'runtimeElements'))
+    add('jarJar', project(':core:agent'))
+}
+
+tasks.named('jar', Jar).configure {
+    inputs.files(included)
+    dependsOn(generateNativeRuntime, generateNoiseNatives)
+    from(nativeRuntimeOutput)
+    from(noiseNativesOutput)
+    from(tasks.named('generateVolmLibStamp')) {
+        into('META-INF/volmit')
+    }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    includeEmptyDirs = false
+    from(jarJar)
+    from(provider { included.resolve().collect { zipTree(it) } }) {
+        exclude('META-INF/INDEX.LIST')
+        exclude('languages/**')
+        exclude('com/fren_gor/**')
+        exclude(NoiseNativeArtifacts.RESOURCE_PREFIX + '**')
+        exclude('iris-language-guides/*.txt')
+
+    }
+    archiveFileName.set(bukkitArtifactName)
+}
+
+tasks.register('buildBukkit') {
+    group = 'build'
+    description = 'Builds and verifies the packed Bukkit plugin.'
+    dependsOn('packedJar', 'check', ':core:check', ':spi:check', ':adapters:bukkit:plugin:check')
+    dependsOn(nmsBindings.collect { String binding -> ":adapters:bukkit:nms:${binding}:check".toString() })
+}
+
+// The three loader jars come out of nested standalone Gradle builds driven through Exec. The outer
+// task therefore has to carry the full inventory of what those builds read: every shared source tree,
+// every build script and version file they load, and the local VolmLib checkout when the composite
+// resolves one. Anything missing from that list publishes a stale jar.
+List<Object> moddedSharedInputs = []
+[
+    'adapters/modded-common/src',
+    'adapters/client-common/src',
+    'core/src/main',
+    'core/src/testFixtures',
+    'core/build.gradle',
+    'core/agent/src',
+    'core/agent/build.gradle',
+    'spi/src/main',
+    'spi/build.gradle',
+    'build.gradle',
+    'settings.gradle',
+    'gradle.properties',
+    'lombok.config',
+    'gradle/libs.versions.toml',
+    'gradle/volmlib-resolution.settings.gradle',
+    'gradle/volmlib-stamp.gradle',
+    'gradle/java21-runtime-exclusions.gradle',
+    'gradle/generation-build-revision.gradle',
+    'gradle/modded-generation-build-revision.gradle',
+    'gradle/native-minecraft-sources.gradle',
+    'gradle/mod-target.gradle',
+    'gradle/mod-targets.json',
+    'gradle/runtime-cache.settings.gradle',
+    'gradle/nested-build.init.gradle',
+    'gradle/modded-version-sources.gradle',
+    'gradle/wrapper/gradle-wrapper.properties',
+    'gradle/wrapper/gradle-wrapper.jar',
+    'gradlew',
+    'gradlew.bat'
+].each { String path -> moddedSharedInputs.add(layout.projectDirectory.file(path).asFile) }
+if (localVolmLibCheckout != null) {
+    moddedSharedInputs.add(fileTree(localVolmLibCheckout) {
+        include('shared/src/main/**', 'shared/src/nativeNoise/**', 'shared/native/noise/prebuilt/**',
+            'native-api/src/main/**', 'native-terrain-api/src/main/**',
+            'native/**/src/main/**',
+            'native/minecraft-common/src/**', 'packaging/src/main/**',
+            '**/build.gradle', 'settings.gradle', 'gradle.properties', 'gradle/libs.versions.toml')
+        exclude('**/build/**', '**/.gradle/**')
+    })
+}
+
+// The published master-SNAPSHOT is resolved inside the nested build, so no outer input changes when it
+// moves. Without a local checkout the Exec tasks always run and the nested build decides what is stale.
+Closure<Void> declareVolmLibInputs = { IrisModdedBuild task ->
+    task.inputs.property('volmLibStamp', volmLibStamp)
+    String nativeBillow = providers.gradleProperty('includeNativeBillow').getOrElse('false')
+    task.inputs.property('includeNativeBillow', nativeBillow)
+    task.environment.put('ORG_GRADLE_PROJECT_includeNativeBillow', nativeBillow)
+    if (localVolmLibCheckout == null) {
+        task.outputs.upToDateWhen { false }
+    }
+    return null
+}
+
+List<String> commonModdedArtifactEntries = [
+    'agent.jar',
+    'pack.mcmeta',
+    'com/fulcrumgenomics/jlibdeflate/LibdeflateDecompressor.class',
+    'com/fulcrumgenomics/jlibdeflate/LibdeflateException.class',
+    'native/linux-aarch64/libjlibdeflate.so',
+    'native/linux-x86_64/libjlibdeflate.so',
+    'native/osx-aarch64/libjlibdeflate.dylib',
+    'native/osx-x86_64/libjlibdeflate.dylib',
+    'native/windows-x86_64/jlibdeflate.dll',
+    'META-INF/iris/generation-kernels/catalog.tsv',
+    'META-INF/iris/generation-kernels/abi-1.revision',
+    'META-INF/volmit/volmlib.properties',
+    'META-INF/services/art.arcane.iris.localization.IrisMessageContributor',
+    'art/arcane/iris/generation/runtime/IrisEngine.class',
+    'art/arcane/iris/pack/datapack/DataVersion.class',
+    'art/arcane/iris/pack/datapack/IDataFixer.class',
+    'art/arcane/iris/spi/IrisPlatform.class',
+    'art/arcane/volmlib/util/mantle/io/Lz4IOWorkerCodecSupport.class',
+    'art/arcane/iris/platform/bootstrap/getHardware.class',
+    // Both shared mixin configs plus the lang file and mod icon every loader's metadata points at.
+    // A shadowJar exclude or a renamed resource that drops any of these is silent at build time and
+    // shows up as a non-applied mixin or a missing-translation report from a user.
+    'volmlib.entity.mixins.json',
+    'volmlib.client.mixins.json',
+    'art/arcane/volmlib/nativelib/minecraft26_2/client/mixin/NativeWorldOpenFlowsMixin.class',
+    'art/arcane/volmlib/nativelib/minecraft26_2/client/mixin/NativeWorldTypeEntryMixin.class',
+    'assets/irisworldgen/lang/en_us.json',
+    'assets/irisworldgen/icon.png'
+]
+
+// The modded jars ship the Bukkit-only code paths inert - excluding them means chasing the whole core
+// reference graph. What must not slip in is new Bukkit coupling in core, which core already declares
+// in purity-allowlist.txt, so the baseline is read from there instead of frozen by hand.
+File bukkitPurityAllowlist = layout.projectDirectory.file('core/purity-allowlist.txt').asFile
+Set<String> bukkitCoupledCoreClasses = bukkitPurityAllowlist.readLines()
+    .findAll { String line -> !line.isBlank() }
+    .collect { String line -> line.trim() - ~/\.java$/ }
+    .toSet()
+
+Map<String, String> moddedLoaderLabels = [fabric: 'Fabric', forge: 'Forge', neoforge: 'NeoForge']
+Map<String, String> moddedLoaderPins = [fabric: 'fabricLoader', forge: 'forge', neoforge: 'neoForge']
+Map<String, String> moddedLoaderProperties = [fabric: 'fabricLoaderVersion', forge: 'forgeVersion', neoforge: 'neoForgeVersion']
+Map<String, String> selectedLoaderVersions = [fabric: fabricLoaderVersion, forge: forgeVersion, neoforge: neoForgeVersion]
+Map<String, List<String>> moddedLoaderEntries = [
+    fabric  : ['fabric.mod.json', 'volmlib.fabric.mixins.json', 'volmlib.accesswidener',
+               'art/arcane/iris/fabric/IrisFabricBootstrap.class'],
+    forge   : ['META-INF/mods.toml', 'META-INF/accesstransformer.cfg',
+               'art/arcane/iris/forge/IrisForgeBootstrap.class'],
+    neoforge: ['META-INF/neoforge.mods.toml', 'META-INF/accesstransformer.cfg',
+               'art/arcane/iris/neoforge/IrisNeoForgeBootstrap.class']
+]
+String moddedWrapperScript = System.getProperty('os.name').toLowerCase().contains('windows') ? 'gradlew.bat' : 'gradlew'
+
+TaskProvider<Task> verifyModdedMatrix = tasks.register('verifyModdedMatrix') {
+    group = 'verification'
+    description = 'Builds, tests and verifies the Fabric, Forge and NeoForge jars of every supported Minecraft mod target.'
+}
+Map<String, TaskProvider<IrisModdedBuild>> selectedModdedBuilds = [:]
+int matrixParallelism = Math.min(gradle.startParameter.maxWorkerCount, Math.max(1,
+    providers.gradleProperty('moddedBuildParallelism').getOrElse(
+        Math.min(12, Math.max(1, Runtime.runtime.availableProcessors() - 4)).toString()).toInteger()))
+Provider<IrisModdedBuildService> matrixWorkers = gradle.sharedServices.registerIfAbsent(
+    'irisModdedBuilds', IrisModdedBuildService) {
+    maxParallelUsages.set(matrixParallelism)
+}
+List<String> nestedBuildArguments = [gradle.startParameter.buildCacheEnabled ? '--build-cache' : '--no-build-cache']
+String paperweightSources = providers.gradleProperty('paperweight.experimental.genSources').orNull
+if (paperweightSources != null) {
+    nestedBuildArguments.add("-Ppaperweight.experimental.genSources=${paperweightSources}".toString())
+}
+boolean multiplexorSandbox = providers.gradleProperty('multiplexorSandbox').getOrElse('false').toBoolean()
+int nestedWorkers = multiplexorSandbox
+    ? Math.max(1, gradle.startParameter.maxWorkerCount.intdiv(matrixParallelism))
+    : Math.min(2, gradle.startParameter.maxWorkerCount)
+int nestedProcessors = multiplexorSandbox ? nestedWorkers : 2
+if (multiplexorSandbox) {
+    nestedBuildArguments.addAll(['--no-daemon', '-PmultiplexorSandbox=true'])
+}
+String nestedJvmArguments = providers.gradleProperty('org.gradle.jvmargs').getOrElse('') +
+    " -XX:ActiveProcessorCount=${nestedProcessors}"
+if (gradle.startParameter.rerunTasks) {
+    nestedBuildArguments.add('--rerun-tasks')
+}
+if (gradle.startParameter.refreshDependencies) {
+    nestedBuildArguments.add('--refresh-dependencies')
+}
+for (File initScript : gradle.startParameter.initScripts) {
+    nestedBuildArguments.addAll(['--init-script', initScript.absolutePath])
+}
+Map<Integer, TaskProvider<IrisModdedBuild>> daemonSlots = [:]
+int nextDaemonSlot = 0
+irisModTargets.each { String targetMinecraft, Map<String, Object> target ->
+    String suffix = targetMinecraft.replace('.', '_')
+    boolean selected = targetMinecraft == minecraftVersion
+    moddedLoaderLabels.each { String loader, String label ->
+        String loaderPin = selected ? selectedLoaderVersions[loader] : target.get(moddedLoaderPins[loader]).toString()
+        String displayedLoader = loaderPin.startsWith(targetMinecraft + '-')
+                ? loaderPin.substring(targetMinecraft.length() + 1) : loaderPin
+        String artifactName = irisArtifactName(label, "${targetMinecraft}+${displayedLoader}")
+        File artifact = file("adapters/${loader}/build/${targetMinecraft}/libs/${artifactName}")
+        boolean unitTests = ((List<String>) (target.testLoaders ?: moddedLoaderLabels.keySet().toList())).contains(loader)
+        int daemonSlot = nextDaemonSlot++ % matrixParallelism
+        TaskProvider<IrisModdedBuild> buildTarget = project(':adapters').tasks.register("verify${label}${suffix}", IrisModdedBuild) {
+            group = 'verification'
+            description = "Builds, tests and verifies the ${label} ${targetMinecraft} jar in its own Gradle build."
+            usesService(matrixWorkers)
+            workingDirectory.set(rootProject.file("adapters/${loader}"))
+            getLabel().set("${label} ${targetMinecraft}".toString())
+            artifactFile.set(artifact)
+            logFile.set(rootProject.layout.buildDirectory.file("reports/modded/${loader}-${targetMinecraft}.log"))
+            requiredEntries.set(commonModdedArtifactEntries + moddedLoaderEntries[loader])
+            forbiddenCoreClasses.set(bukkitCoupledCoreClasses)
+            javaRuntime.set((int) target.java)
+            List<String> command = [rootProject.file(moddedWrapperScript).absolutePath, 'assemble', 'compileTestJava',
+                    'verifyLoggingPolicy', 'verifyNativeClassBoundary', '--console=plain',
+                    "--max-workers=${nestedWorkers}",
+                    "-Dorg.gradle.jvmargs=${nestedJvmArguments.trim()}",
+                    "-Dorg.gradle.daemon.registry.base=${rootProject.file(".gradle/iris-daemons/slot-${daemonSlot}").absolutePath}",
+                    '-Dorg.gradle.daemon.idletimeout=3600000',
+                    "-PirisBuildLane=${loader}-${targetMinecraft}",
+                    '--project-cache-dir', rootProject.file("adapters/${loader}/.gradle/iris-lanes/${loader}-${targetMinecraft}").absolutePath,
+                    '--init-script', rootProject.file('gradle/nested-build.init.gradle').absolutePath,
+                    "-PirisVersion=${rootProject.version}", "-PminecraftVersion=${targetMinecraft}",
+                    "-P${moddedLoaderProperties[loader]}=${loaderPin}",
+                    "-PuseLocalVolmLib=${localVolmLibCheckout != null}"]
+            if (unitTests) {
+                command.add('test')
+            }
+            command.add("-PtestForks=${providers.gradleProperty('moddedTestForks').getOrElse('1')}")
+            command.addAll(nestedBuildArguments)
+            commandLine.set(command.collect { Object argument -> argument.toString() })
+            if (localVolmLibCheckout != null) {
+                environment.put('ORG_GRADLE_PROJECT_localVolmLibDirectory', localVolmLibCheckout.absolutePath)
+            }
+            inputs.files(moddedSharedInputs).withPropertyName('moddedSharedSources')
+                .withPathSensitivity(PathSensitivity.RELATIVE)
+            inputs.files(rootProject.file("adapters/${loader}/src"), rootProject.file("adapters/${loader}/build.gradle"),
+                    rootProject.file("adapters/${loader}/settings.gradle"), rootProject.file("adapters/${loader}/gradle.properties"))
+                .withPropertyName('adapterSources')
+            inputs.files(gradle.startParameter.allInitScripts).withPropertyName('initScripts')
+                .withPathSensitivity(PathSensitivity.NONE)
+            outputs.upToDateWhen { !gradle.startParameter.refreshDependencies }
+            inputs.properties(target)
+            inputs.property('loaderVersion', loaderPin)
+            inputs.property('irisVersion', rootProject.version.toString())
+            declareVolmLibInputs(it)
+            if (unitTests) {
+                outputs.dir(rootProject.file("adapters/${loader}/build/${targetMinecraft}/test-results/test"))
+            }
+        }
+        TaskProvider<IrisModdedBuild> previousSlotBuild = daemonSlots[daemonSlot]
+        if (previousSlotBuild != null) {
+            buildTarget.configure { mustRunAfter(previousSlotBuild) }
+        }
+        daemonSlots[daemonSlot] = buildTarget
+        tasks.register("verify${label}${suffix}") {
+            group = 'verification'
+            description = "Builds, tests and verifies the ${label} ${targetMinecraft} jar."
+            dependsOn(buildTarget)
+        }
+        verifyModdedMatrix.configure { dependsOn(buildTarget) }
+        if (selected) {
+            selectedModdedBuilds[loader] = buildTarget
+        }
+    }
+}
+if (selectedModdedBuilds.isEmpty()) {
+    throw new GradleException("Minecraft ${minecraftVersion} is not a mod target in gradle/mod-targets.json")
+}
+
+tasks.register('prepareRelease', Sync) {
+    group = 'distribution'
+    description = 'Builds, verifies and stages one selected mod loader jar for publication.'
+    Provider<IrisModdedBuild> releaseBuild = providers.provider {
+        String releaseLoader = providers.gradleProperty('releaseLoader').orNull
+        if (!moddedLoaderLabels.containsKey(releaseLoader)) {
+            throw new GradleException('prepareRelease requires -PreleaseLoader=fabric, forge or neoforge')
+        }
+        return selectedModdedBuilds[releaseLoader].get()
+    }
+    dependsOn(releaseBuild)
+    from(releaseBuild.flatMap { IrisModdedBuild task -> task.artifactFile })
+    into(layout.buildDirectory.dir('release'))
+}
+
+tasks.register('buildFabric') {
+    group = 'iris'
+    description = "Builds and verifies the Fabric ${minecraftVersion} jar."
+    dependsOn(selectedModdedBuilds.fabric)
+}
+
+tasks.register('buildForge') {
+    group = 'iris'
+    description = "Builds and verifies the Forge ${minecraftVersion} jar."
+    dependsOn(selectedModdedBuilds.forge)
+}
+
+tasks.register('buildNeoforge') {
+    group = 'iris'
+    description = "Builds and verifies the NeoForge ${minecraftVersion} jar."
+    dependsOn(selectedModdedBuilds.neoforge)
+}
+
+tasks.register('checkAll') {
+    group = 'verification'
+    description = 'Runs every root, core, Bukkit and SPI check plus the full Fabric, Forge and NeoForge matrix for every Minecraft mod target.'
+    dependsOn(allprojects.collect { Project candidate -> candidate.tasks.matching { Task task -> task.name == 'check' } })
+    dependsOn(verifyModdedMatrix)
+}
+
+// Entries the Bukkit artifact only ever reaches by name - NMS binding lookup, the SIMD kernels, the
+// instrumentation agent, the JarScanner-driven command and service discovery, the Matter codec - plus
+// the two plugin descriptors and the slimjar manifests. Nothing in the reference graph points at
+// them, so a shadowJar exclude that drops one is silent until a server hits that path.
+File commandSourceRoot = layout.projectDirectory.dir('core/src/main/java').asFile
+FileTree commandHandlerSources = fileTree(commandSourceRoot) {
+    include('art/arcane/iris/command/handlers/**/*.java')
+    include('art/arcane/iris/command/context/**/*.java')
+    include('art/arcane/iris/command/specialhandlers/**/*.java')
+}
+List<String> requiredCommandHandlerEntries = commandHandlerSources.files.collect { File source ->
+    commandSourceRoot.toPath().relativize(source.toPath()).toString()
+        .replace(File.separator, '/').replaceAll(/\.java$/, '.class')
+}.sort()
+FileTree mantleComponentSources = fileTree(commandSourceRoot) {
+    include('art/arcane/iris/generation/mantle/**/*.java')
+}
+List<String> requiredMantleComponentEntries = mantleComponentSources.files.findAll { File source ->
+    source.getText('UTF-8') =~ /(?m)^\s*@ComponentFlag\b/
+}.collect { File source ->
+    commandSourceRoot.toPath().relativize(source.toPath()).toString()
+        .replace(File.separator, '/').replaceAll(/\.java$/, '.class')
+}.sort()
+List<String> requiredBukkitArtifactEntries = [
+    'META-INF/iris/generation-kernels/catalog.tsv',
+    'META-INF/iris/generation-kernels/abi-1.revision',
+    'plugin.yml',
+    'paper-plugin.yml',
+    'slimjar.dat',
+    'slimjar-resolutions.dat',
+    'META-INF/iris/native-runtime.properties',
+    NoiseNativeArtifacts.MANIFEST,
+    'META-INF/volmit/volmlib.properties',
+    'iris-language-source.properties',
+    'agent.jar',
+    'art/arcane/iris/Iris.class',
+    'art/arcane/iris/IrisBootstrap.class',
+    'art/arcane/iris/platform/bukkit/nms/INMS.class',
+    'art/arcane/iris/platform/bukkit/nms/BukkitBinding.class',
+    'art/arcane/volmlib/nativelib/NativeAdapters.class',
+    'art/arcane/volmlib/nativelib/terrain/NativeWorldGeneration.class',
+    'art/arcane/iris/platform/bukkit/nms/v1X/NMSBinding1X.class',
+    'art/arcane/iris/platform/generation/PlatformChunkGenerator.class',
+    'art/arcane/iris/world/lifecycle/WorldLifecycleStaging.class',
+    'art/arcane/iris/generation/simd/VectorSimdKernels.class',
+    'art/arcane/iris/platform/agent/Agent.class',
+    'art/arcane/iris/platform/bootstrap/getHardware.class',
+    'art/arcane/volmlib/util/io/JarScanner.class',
+    'art/arcane/volmlib/util/director/runtime/DirectorRuntimeEngine.class',
+    'art/arcane/volmlib/util/mantle/io/Lz4IOWorkerCodecSupport.class',
+    'art/arcane/volmlib/util/matter/Matter.class'
+] + requiredCommandHandlerEntries + requiredMantleComponentEntries
+
+tasks.register('verifyBukkitArtifact') {
+    group = 'verification'
+    dependsOn('jar')
+    Provider<RegularFile> artifact = tasks.named('jar', Jar).flatMap { Jar task -> task.archiveFile }
+    inputs.file(artifact)
+    inputs.files(nativeRuntime)
+    inputs.files(commandHandlerSources)
+    inputs.files(mantleComponentSources)
+    inputs.property('languageSourceManifest', languageSourceManifest)
+    doLast {
+        File archive = artifact.get().asFile
+        BukkitArtifactVerifier.verify(
+                archive,
+                requiredBukkitArtifactEntries,
+                16,
+                runtimeDownloadedPrefixes,
+                languageSourceManifest)
+        NativeRuntimeArtifacts.verify(archive, nativeRuntimeModules, embeddedNatives())
+        NoiseNativeArtifacts.verify(archive)
+        logger.lifecycle("Verified ${archive.name} packaging and class reference graph")
+    }
+}
+
+tasks.named('buildBukkit').configure {
+    dependsOn('verifyBukkitArtifact')
+}
+
+tasks.register('buildAll') {
+    group = 'build'
+    description = 'Builds and verifies the Bukkit plugin, API, SPI and every supported mod target.'
+    dependsOn('buildBukkit', 'irisApi', ':spi:jar', verifyModdedMatrix)
+}
+
+tasks.register('irisDev', Copy) {
+    group = 'iris'
+    from(project(':core').layout.buildDirectory.files('libs/core-javadoc.jar', 'libs/core-sources.jar'))
+    rename { String fileName -> fileName.replace('core', "Iris-${project.version}") }
+    into(layout.buildDirectory)
+    dependsOn(':core:sourcesJar')
+    dependsOn(':core:javadocJar')
+}
+
+int defaultTestForks = Math.min(8, Math.max(1, Runtime.runtime.availableProcessors().intdiv(2)))
+int testForks = Math.max(1, Integer.parseInt(providers.gradleProperty('testForks')
+    .getOrElse(String.valueOf(defaultTestForks))))
+int irisRuntimeJava = providers.gradleProperty('irisRuntimeJava').getOrElse(irisModTarget.java.toString()).toInteger()
+if (!(irisRuntimeJava in [21, 25])) {
+    throw new GradleException('irisRuntimeJava must be 21 or 25')
+}
+Set<String> sharedRuntimeProjects = [':core', ':core:agent', ':spi'] as Set<String>
+String runtimeOutputVariant = gradle.extensions.extraProperties.get('irisRuntimeOutputVariant').toString()
+
+allprojects {
+    apply plugin: 'java'
+    boolean java21Runtime = irisRuntimeJava == 21 && sharedRuntimeProjects.contains(project.path)
+    if (!runtimeOutputVariant.isEmpty() && sharedRuntimeProjects.contains(project.path)) {
+        layout.buildDirectory.set(layout.projectDirectory.dir("build/${runtimeOutputVariant}"))
+    }
+
+    apply from: rootProject.file('gradle/mockito-agent.gradle')
+
+    tasks.withType(Test).configureEach {
+        int moduleForks = project.path.startsWith(':adapters:bukkit:') ? Math.min(2, testForks)
+            : project.path == ':probe' ? Math.min(4, testForks) : testForks
+        maxParallelForks = Math.min(gradle.startParameter.maxWorkerCount, moduleForks)
+        jvmArgs('-XX:ParallelGCThreads=2', '-XX:ConcGCThreads=1', '-XX:CICompilerCount=2')
+        timeout = java.time.Duration.ofMinutes(60)
+    }
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(25)
+        }
+        if (java21Runtime) {
+            sourceCompatibility = JavaVersion.VERSION_21
+            targetCompatibility = JavaVersion.VERSION_21
+        }
+    }
+
+    if (java21Runtime) {
+        Provider<JavaLauncher> runtimeLauncher = javaToolchains.launcherFor {
+            languageVersion = JavaLanguageVersion.of(21)
+        }
+        tasks.withType(JavaCompile).configureEach {
+            sourceCompatibility = '21'
+            targetCompatibility = '21'
+            if (project.path == ':core') {
+                options.compilerArgumentProviders.add({
+                    ['--system', runtimeLauncher.get().metadata.installationPath.asFile.absolutePath]
+                } as org.gradle.process.CommandLineArgumentProvider)
+            } else {
+                options.release.set(21)
+            }
+        }
+        if (project.path != ':core') {
+            tasks.withType(Test).configureEach {
+                javaLauncher.set(runtimeLauncher)
+            }
+        }
+    }
+
+    repositories {
+        mavenCentral()
+        maven { url = uri('https://repo.papermc.io/repository/maven-public/') }
+        maven { url = uri('https://repo.codemc.org/repository/maven-public/') }
+
+        maven {
+            url = uri('https://jitpack.io')
+            content { includeGroupByRegex('com\\.github\\..*') }
+        } // score
+        maven {
+            url = uri('https://repo.auxilor.io/repository/maven-releases/')
+            content { includeGroupByRegex('com\\.willfp(\\..*)?') }
+        } // eco
+        maven {
+            url = uri('https://repo.nexomc.com/releases/')
+            content {
+                includeGroup('com.nexomc')
+                includeGroup('team.unnamed')
+            }
+        } // nexo
+        maven {
+            url = uri('https://repo.oraxen.com/releases/')
+            content { includeGroup('io.th0rgal') }
+        }
+        maven {
+            url = uri('https://repo.extendedclip.com/releases/')
+            content { includeGroup('me.clip') }
+        } // placeholderapi
+        maven {
+            url = uri('https://mvn.lumine.io/repository/maven-public/')
+            content {
+                includeModule('io.lumine', 'Mythic-Dist')
+                includeModule('io.lumine', 'MythicCrucible-Dist')
+            }
+        } // mythic
+        maven {
+            url = uri('https://nexus.phoenixdevt.fr/repository/maven-public/')
+            content {
+                includeGroup('net.Indyuce')
+                includeModule('io.lumine', 'MythicLib-dist')
+            }
+        } //MMOItems
+        maven {
+            url = uri('https://repo.onarandombox.com/content/groups/public/')
+            content { includeGroupByRegex('org\\.mvplugins\\.multiverse(\\..*)?') }
+        } //Multiverse Core
+        maven {
+            url = uri('https://repo.momirealms.net/releases/')
+            content { includeGroup('net.momirealms') }
+        } // CraftEngine
+    }
+
+    /**
+     * We need parameter meta for the decree command system
+     */
+    tasks.named('compileJava', JavaCompile).configure {
+        options.compilerArgs.add('-parameters')
+        options.encoding = 'UTF-8'
+        options.debugOptions.debugLevel = 'none'
+        if (!java21Runtime) {
+            options.release.set(25)
+        }
+    }
+
+    tasks.named('javadoc').configure {
+        options.encoding = 'UTF-8'
+        options.quiet()
+        //options.addStringOption("Xdoclint:none") // TODO: Re-enable this
+    }
+
+    tasks.register('sourcesJar', Jar) {
+        archiveClassifier.set('sources')
+        from(sourceSets.main.allSource)
+    }
+
+    tasks.register('javadocJar', Jar) {
+        archiveClassifier.set('javadoc')
+        from(tasks.named('javadoc').map { it.destinationDir })
+    }
+}
+
+if (!JavaVersion.current().isCompatibleWith(JavaVersion.VERSION_25)) {
+    System.err.println()
+    System.err.println('=========================================================================================================')
+    System.err.println('You must run gradle on Java 25 or newer. You are using ' + JavaVersion.current())
+    System.err.println()
+    System.err.println('=== For IDEs ===')
+    System.err.println('1. Configure the project for Java 25 toolchain')
+    System.err.println('2. Configure the bundled gradle to use Java 25+ in settings')
+    System.err.println()
+    System.err.println('=== For Command Line (gradlew) ===')
+    System.err.println('1. Install JDK 25 from https://adoptium.net/temurin/releases/?version=25')
+    System.err.println('2. Set JAVA_HOME environment variable to the new jdk installation folder such as C:\\Program Files\\Java\\jdk-25')
+    System.err.println('3. Open a new command prompt window to get the new environment variables if need be.')
+    System.err.println('=========================================================================================================')
+    System.err.println()
+    System.exit(69)
+}
+
+pluginPackaging {
+    artifacts {
+        create('distribution') {
+            taskName = 'jar'
+            policyName = 'Iris Bukkit'
+            packed = true
+            packedJarAccessors = ['art/arcane/iris/platform/bukkit/plugin/VolmitPlugin#getJarFile']
+            packedPayloadOnlyPrefixes = ['iris-language-guides/', 'META-INF/iris/generation-kernels/abi-', 'iris/icons/views/', 'iris/datapack/']
+            packedMaximumBootstrapClasses = 90
+            stripDirectories = true
+            stripLocalVariables = true
+            releaseCompression = providers.gradleProperty('compactRelease')
+                .map { String value -> value.toBoolean() }
+                .getOrElse(!PackagingMode.resolve(providers).development())
+            prunePrefixes = ['art/arcane/volmlib/']
+            keepPrefixes = ['art/arcane/volmlib/util/matter/slices/', 'art/arcane/volmlib/nativelib/']
+            shrinkRules = [file('packaging/shrink.pro'), nativeRuntimeRules.get().asFile]
+            shrinkDontwarn = [
+                'java.lang.invoke.MethodHandle',
+                'java.lang.invoke.VarHandle',
+                'net.minecraft.server.MinecraftServer',
+                'net.minecraft.server.level.ServerLevel',
+                'net.minecraft.world.attribute.EnvironmentAttributes',
+                'net.minecraft.world.level.NaturalSpawner',
+                'net.minecraft.world.level.StructureManager',
+                'net.minecraft.world.level.biome.BiomeManager',
+                'net.minecraft.world.level.biome.BiomeResolver',
+                'net.minecraft.world.level.biome.BiomeSource',
+                'net.minecraft.world.level.biome.MobSpawnSettings',
+                'net.minecraft.world.level.biome.MobSpawnSettings$SpawnerData',
+                'net.minecraft.world.level.chunk.ChunkAccess',
+                'net.minecraft.world.level.chunk.ChunkGenerator',
+                'net.minecraft.world.level.chunk.status.ChunkStatus',
+                'net.minecraft.world.level.levelgen.RandomState',
+                'net.minecraft.world.level.levelgen.feature.Feature',
+                'net.minecraft.world.level.levelgen.structure.Structure',
+                'net.minecraft.world.level.levelgen.structure.placement.ConcentricRingsStructurePlacement',
+                'net.minecraft.world.level.levelgen.structure.placement.RandomSpreadStructurePlacement',
+                'org.bukkit.craftbukkit.inventory.CraftItemStack',
+            ]
+            shrinkLibraries.from(provider { project(':core').configurations.compileClasspath })
+            shrinkLibraries.from(provider { project(':adapters:bukkit:plugin').configurations.compileClasspath })
+            nmsBindings.each { binding ->
+                shrinkLibraries.from(provider { project(":adapters:bukkit:nms:${binding}").configurations.compileClasspath.incoming.artifactView {
+                    Set nativeComponents = nativeRuntime.incoming.artifacts.artifacts.collect { artifact -> artifact.id.componentIdentifier }.toSet()
+                    componentFilter { component -> !nativeComponents.contains(component) }
+                }.files })
+            }
+            shrinkRelocations = runtimeDownloadRelocations
+        }
+    }
+}
+
+project(':adapters:bukkit:nms:v26_3_R1') {
+    Configuration headlessNativeSources = configurations.create('headlessNativeSources') {
+        canBeConsumed = false
+        canBeResolved = true
+    }
+    dependencies.add(headlessNativeSources.name,
+            'com.github.VolmitSoftware.VolmLib:native-minecraft26_2-sources:master-SNAPSHOT')
+    List<String> headlessNativeTypes = ['ModdedBlockState', 'ModdedBiome', 'NativeBlockProperties', 'NativeBlockResolver',
+            'NativeBlockFaces', 'NativeStateRotator', 'NativeStateMerger',
+            'NativeRegistryAccess', 'ModdedItem', 'ModdedEntityType', 'NativeTileReader', 'NativeTileData']
+    TaskProvider<Sync> unpackHeadlessNativeSources = tasks.register('unpackHeadlessNativeSources', Sync) {
+        dependsOn(headlessNativeSources)
+        inputs.property('nativeTypes', headlessNativeTypes)
+        from(provider { headlessNativeSources.collect { File artifact -> zipTree(artifact) } }) {
+            headlessNativeTypes.each { String type -> include("art/arcane/volmlib/nativelib/minecraft26_2/modded/${type}.java") }
+        }
+        from(rootProject.file('adapters/modded-common/src/main/java')) {
+            include('art/arcane/iris/modded/ModdedDecoratorHooks.java',
+                    'art/arcane/iris/modded/ModdedStateRotator.java', 'art/arcane/iris/modded/ModdedTileData.java')
+        }
+        into(layout.buildDirectory.dir('generated/sources/headless-native'))
+    }
+    sourceSets {
+        offline {
+            java.srcDir(unpackHeadlessNativeSources)
+            compileClasspath += sourceSets.main.compileClasspath
+            runtimeClasspath += sourceSets.main.compileClasspath + sourceSets.main.output
+        }
+    }
+    dependencies {
+        offlineImplementation(project(':probe'))
+        offlineImplementation(project(':core'))
+        offlineImplementation('com.github.VolmitSoftware.VolmLib:native-common:master-SNAPSHOT') {
+            transitive = false
+        }
+        offlineImplementation(volmLibShared) {
+            transitive = false
+        }
+    }
+    sourceSets.test.compileClasspath += sourceSets.offline.output
+    sourceSets.test.runtimeClasspath += sourceSets.offline.output
+    tasks.named('test').configure {
+        String exportProbePack = providers.gradleProperty('iris.exportProbePack').orNull
+        if (exportProbePack != null) {
+            systemProperty('iris.exportProbePack', exportProbePack)
+            maxHeapSize = '6g'
+        }
+    }
+
+    TaskProvider<Jar> offlineJar = tasks.register('offlineJar', Jar) {
+        dependsOn(offlineClasses)
+        archiveClassifier = 'offline'
+        from(sourceSets.offline.runtimeClasspath.filter { File file -> file.isDirectory() })
+    }
+    FileCollection offlineLibraries = sourceSets.offline.runtimeClasspath.filter { File file -> file.isFile() }
+    TaskProvider<CreateStartScripts> offlineStartScripts = tasks.register('offlineStartScripts', CreateStartScripts) {
+        dependsOn(offlineJar)
+        mainClass = 'art.arcane.iris.probe.OfflineRegionGenerator'
+        applicationName = 'iris-offline'
+        outputDir = layout.buildDirectory.dir('offline-scripts').get().asFile
+        classpath = files(offlineJar) + offlineLibraries
+        defaultJvmOpts = ['-Xmx8G', '--add-modules=jdk.incubator.vector', '-Djava.awt.headless=true']
+    }
+    tasks.register('installOffline', Sync) {
+        group = 'distribution'
+        description = 'Installs the standalone native region generator and its runtime libraries.'
+        dependsOn(offlineJar, offlineStartScripts)
+        into(layout.buildDirectory.dir('install/iris-offline'))
+        into('lib') { from(offlineJar, offlineLibraries) }
+        into('bin') {
+            from(offlineStartScripts)
+            filePermissions { unix('rwxr-xr-x') }
+        }
+    }
+
+    tasks.register('datapackCostProbe', JavaExec) {
+        group = 'verification'
+        description = 'Exports an Iris dimension as a 26.3 worldgen datapack and measures its load, chunk and density function cost against vanilla.'
+        dependsOn(offlineClasses)
+        mainClass = 'art.arcane.iris.probe.DatapackCostProbe'
+        classpath = sourceSets.offline.runtimeClasspath
+        maxHeapSize = providers.gradleProperty('probeHeap').getOrElse('24G')
+        jvmArgs('--add-modules', 'jdk.incubator.vector', '-Djava.awt.headless=true')
+        doFirst {
+            String dimension = providers.gradleProperty('probeDimension').getOrElse('overworld')
+            String output = providers.gradleProperty('probeOutput')
+                    .getOrElse(layout.buildDirectory.file("reports/datapack-cost/${dimension}.json").get().asFile.absolutePath)
+            args([rootProject.file(providers.gradleProperty('probePack').get()).absolutePath, dimension,
+                    providers.gradleProperty('probeSeed').getOrElse('1337'),
+                    providers.gradleProperty('probeChunkSide').getOrElse('6'),
+                    providers.gradleProperty('probeRounds').getOrElse('4'),
+                    providers.gradleProperty('probeWarmupSide').getOrElse('6'),
+                    providers.gradleProperty('probeCalls').getOrElse('256'),
+                    providers.gradleProperty('probeCallSeconds').getOrElse('60'),
+                    rootProject.file(output).absolutePath,
+                    layout.buildDirectory.dir('tmp/datapack-cost').get().asFile.absolutePath])
+        }
+    }
+
+    tasks.register('regionMantleInspection', JavaExec) {
+        group = 'verification'
+        dependsOn(testClasses)
+        mainClass = 'art.arcane.iris.probe.HeadlessMantleInspection'
+        classpath = sourceSets.test.runtimeClasspath
+        maxHeapSize = '4G'
+        jvmArgs('--add-modules', 'jdk.incubator.vector', '-Djava.awt.headless=true')
+        doFirst {
+            args(['probePack', 'probeDimension', 'probeSeed', 'probeWorld', 'probeRegionX', 'probeRegionZ']
+                    .collect { String name -> providers.gradleProperty(name).get() })
+        }
+    }
+
+    tasks.register('generateOfflineRegions', JavaExec) {
+        group = 'verification'
+        description = 'Writes fresh native TERRAIN checkpoints with exact prerequisites for subsequent native FULL completion.'
+        dependsOn(offlineClasses)
+        mainClass = 'art.arcane.iris.probe.OfflineRegionGenerator'
+        classpath = sourceSets.offline.runtimeClasspath
+        maxHeapSize = '8G'
+        jvmArgs('--add-modules', 'jdk.incubator.vector', '-Djava.awt.headless=true')
+        doFirst {
+            List<String> names = ['probePack', 'probeDimension', 'probeSeed', 'probeChunkX', 'probeChunkZ',
+                    'probeWidth', 'probeRegionsX', 'probeRegionsZ', 'probeParallelism', 'probeSpigot', 'probeWorldName', 'probeLevelKey',
+                    'probeNoiseSettings', 'probeOutput']
+            args(names.collect { String name -> providers.gradleProperty(name).get() })
+        }
+    }
+
+    tasks.register('datapackFidelityProbe', JavaExec) {
+        group = 'verification'
+        description = 'Exports an Iris dimension as a 26.3 worldgen datapack and compares both generators on the same seed.'
+        dependsOn(offlineClasses)
+        mainClass = 'art.arcane.iris.probe.DatapackFidelityProbe'
+        classpath = sourceSets.offline.runtimeClasspath
+        maxHeapSize = '8G'
+        jvmArgs('--add-modules', 'jdk.incubator.vector', '-Djava.awt.headless=true')
+        doFirst {
+            String dimension = providers.gradleProperty('probeDimension').get()
+            String seed = providers.gradleProperty('probeSeed').get()
+            String mode = providers.gradleProperty('probeMode').getOrElse('full')
+            boolean biomes = mode == 'biomes'
+            String output = providers.gradleProperty('probeOutput')
+                    .getOrElse(layout.buildDirectory.file("reports/datapack-fidelity/${dimension}-${seed}${biomes ? '-biomes' : ''}.json").get().asFile.absolutePath)
+            args([rootProject.file(providers.gradleProperty('probePack').get()).absolutePath, dimension, seed,
+                    biomes ? providers.gradleProperty('probeRadiusChunks').getOrElse('0') : providers.gradleProperty('probeRadiusChunks').get(),
+                    biomes ? providers.gradleProperty('probeStride').getOrElse('1') : providers.gradleProperty('probeStride').get(),
+                    rootProject.file(output).absolutePath,
+                    providers.gradleProperty('probeSurveyBlocks').getOrElse('65536'),
+                    providers.gradleProperty('probeSurveyStride').getOrElse('256'),
+                    providers.gradleProperty('probeSurveySeeds').getOrElse(biomes ? '7' : '1'),
+                    mode])
+        }
+    }
+
+
+}
+
+project(':adapters:bukkit:nms:v26_3_R1') {
+    Provider<Directory> fixtureResources = layout.buildDirectory.dir('generated/region-native-fixture')
+    TaskProvider<Task> fixtureDescriptor = tasks.register('regionNativeFixtureDescriptor') {
+        outputs.dir(fixtureResources)
+        doLast {
+            File descriptor = fixtureResources.get().file('plugin.yml').asFile
+            descriptor.parentFile.mkdirs()
+            descriptor.text = '''name: RegionNativeFixture
+version: 1.0
+main: art.arcane.iris.probe.RegionNativeFixture
+api-version: '26.3'
+depend: [Iris]
+commands:
+  mcaterrain:
+    description: Export native terrain checkpoints on an isolated test server
+  mcaload:
+    description: Verify native terrain checkpoints finish generation on reload
+'''
+        }
+    }
+    TaskProvider<JavaCompile> compileRegionNativeFixture = tasks.register('compileRegionNativeFixture', JavaCompile) {
+        source(fileTree('src/test/java') {
+            include('art/arcane/iris/probe/RegionNativeFixture.java',
+                    'art/arcane/iris/probe/DetachedNativeTerrain.java')
+        })
+        source(fileTree('src/offline/java') {
+            include('art/arcane/iris/probe/RegionGenerationWindow.java',
+                    'art/arcane/iris/probe/NativeRegionTerrainWriter.java',
+                    'art/arcane/iris/probe/NativeRegionPlan.java')
+        })
+        classpath = sourceSets.test.compileClasspath
+        destinationDirectory = layout.buildDirectory.dir('classes/region-native-fixture')
+        javaCompiler = javaToolchains.compilerFor { languageVersion = JavaLanguageVersion.of(25) }
+        options.release = 25
+        options.compilerArgs.add('-parameters')
+    }
+    tasks.register('regionNativeFixtureJar', Jar) {
+        dependsOn(compileRegionNativeFixture, fixtureDescriptor)
+        archiveFileName = 'mca-native-fixture.jar'
+        from(compileRegionNativeFixture.flatMap { JavaCompile task -> task.destinationDirectory })
+        from(fixtureResources)
+    }
+}
+
+tasks.withType(PackedJar).configureEach {
+    nativeManifestPath.set(NativeRuntimeArtifacts.MANIFEST)
+    nativeResourceDirectory.set(NativeRuntimeArtifacts.RESOURCES)
+    dependsOn(tasks.named('verifyBukkitArtifact'), nativeRuntime)
+    nativeArtifacts.set(providers.provider { embeddedNatives() })
+    doLast { PackedJar task ->
+        NativeRuntimeArtifacts.verifyPacked(task.outputJar.get().asFile, nativeRuntimeModules, embeddedNatives())
+    }
+}
+
+tasks.register('buildSwiftSwamp', Copy) {
+    group = 'development'
+    description = 'Builds, verifies, and stages Iris in the workspace BUILDS directory.'
+    dependsOn('buildBukkit')
+    outputs.upToDateWhen { false }
+    from(tasks.named('packedJar', PackedJar).flatMap { PackedJar archive -> archive.outputJar })
+    into(providers.gradleProperty('buildsDirectory').orElse('../BUILDS'))
+    rename { String ignored -> 'Iris.jar' }
+}
+
+apply from: file('gradle/multiplexor.gradle')

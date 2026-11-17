@@ -1,0 +1,991 @@
+package art.arcane.iris.generation.hydrology.plan;
+
+import art.arcane.iris.generation.block.IrisBlockData;
+import art.arcane.iris.generation.decoration.IrisDecorationPart;
+import art.arcane.iris.generation.decoration.IrisDecorator;
+import art.arcane.iris.generation.hydrology.config.IrisCavePools;
+import art.arcane.iris.generation.hydrology.config.IrisCaveSprings;
+import art.arcane.iris.generation.hydrology.config.IrisFluidProfile;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyClimate;
+import art.arcane.iris.generation.hydrology.config.IrisHydrology;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyDeformation;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyDelta;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyDrainage;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyEstuary;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyLakes;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyMaterials;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyPonds;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyTier;
+import art.arcane.iris.generation.hydrology.config.IrisGrottos;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyUnderground;
+import art.arcane.iris.generation.hydrology.config.IrisPondDams;
+import art.arcane.iris.generation.hydrology.config.IrisPondNatural;
+import art.arcane.iris.generation.hydrology.config.IrisPondSeeded;
+import art.arcane.iris.generation.hydrology.config.IrisPondShore;
+import art.arcane.iris.generation.hydrology.config.IrisBankStyle;
+import art.arcane.iris.generation.hydrology.config.IrisSeaInlets;
+import art.arcane.iris.generation.hydrology.raster.WaterHeads;
+import art.arcane.iris.generation.hydrology.water.HydrologyTier;
+import art.arcane.iris.generation.hydrology.water.LakeCandidate;
+import art.arcane.iris.generation.noise.IrisGeneratorStyle;
+import art.arcane.iris.generation.terrain.IrisMaterialPalette;
+import com.google.gson.Gson;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+public final class HydrologySettings {
+    private static final Gson PALETTE_JSON = new Gson();
+    private static final int MAX_BANK_BAND = 64;
+    private static final int MAX_ESTUARY_LENGTH = 256;
+    private static final double MAX_ESTUARY_FLARE = 4D;
+    private static final int MIN_DELTA_CHANNELS = 2;
+    private static final int MAX_DELTA_CHANNELS = 4;
+    private static final double MIN_DELTA_SPREAD = 10D;
+    private static final double MAX_DELTA_SPREAD = 80D;
+    private static final int MIN_DELTA_LENGTH = 8;
+    private static final int MAX_DELTA_LENGTH = 384;
+    public static final float MAX_HALF_WIDTH = 64f;
+    public static final int DELTA_STEP = 2;
+    private static final int TIDAL_BASE_TIER = 1;
+    private static final String TIDAL_TIER_NAME = "tidal";
+    private static final double MIN_INLET_MOUTH = 2D;
+    private static final double MAX_INLET_MOUTH = 32D;
+    private static final double MIN_INLET_HEAD = 1D;
+    private static final double MAX_INLET_HEAD = 8D;
+    private static final int MIN_INLET_DEPTH = 2;
+    private static final int MAX_INLET_DEPTH = 16;
+    private static final int MIN_INLET_BANK_HEIGHT = 2;
+    private static final int MAX_INLET_BANK_HEIGHT = 128;
+    private static final double MIN_INLET_TAPER = 0.5D;
+    private static final double MAX_INLET_TAPER = 4D;
+    private static final double MAX_INLET_WIDTH_VARIATION = 0.5D;
+    private static final double MIN_INLET_MEANDER_WIDTH = 1D;
+    private static final double MAX_INLET_MEANDER_WIDTH = 16D;
+    private static final int MIN_INLET_BANK_BAND = 4;
+    private static final int MAX_INLET_BANK_BAND = 64;
+    private static final int MIN_GROTTO_SPACING = 64;
+    private static final double MIN_GROTTO_RADIUS = 2D;
+    private static final double MAX_GROTTO_RADIUS = 16D;
+    private static final int MIN_GROTTO_HEADROOM = 3;
+    private static final int MAX_GROTTO_HEADROOM = 32;
+    private static final double MIN_GROTTO_MOUTH = 3D;
+    private static final double MAX_GROTTO_MOUTH = 24D;
+    private static final int MAX_GROTTO_LENGTH = 384;
+    private static final int INLET_LAST_STEP = (int) Math.ceil(WindowPlanner.CELL * Math.sqrt(2D));
+    private static final double INLET_MEANDER_SCALE = 2.5D;
+    private static final double INLET_MEANDER_MAX = 16D;
+    public static final int MAX_CAVE_POOL_RADIUS = 15;
+    private static final int CAVE_POOL_SPAN = 2 * MAX_CAVE_POOL_RADIUS + 1;
+    private static final int MAX_CAVE_POOL_AREA = CAVE_POOL_SPAN * CAVE_POOL_SPAN;
+    private static final int MIN_DEEP_FLUID_Y = -2032;
+    private static final int MAX_DEEP_FLUID_Y = 2031;
+    private static final double MAX_SPRING_DENSITY = 2D;
+    private static final int MAX_SPRING_DEPTH = 256;
+    private static final int MAX_LAKE_AREA = LakeCandidate.MAX_EXTENT * LakeCandidate.MAX_EXTENT;
+    private static final int MAX_PREFETCH_RINGS = 4;
+    private static final int MAX_SEEDED_DENSITY = 64;
+    private static final int MIN_WATERFALL_DROP = 2;
+
+    private final long seed;
+    private final int seaLevel;
+    private final int minY;
+    private final int maxY;
+    private final boolean enabled;
+    private final float density;
+    private final Climate climate;
+    private final Drainage drainage;
+    private final List<HydrologyTier> tiers;
+    private final Ponds ponds;
+    private final Lakes lakes;
+    private final Deformation deformation;
+    private final Underground underground;
+    private final HydrologyTier tidalTier;
+    private final Map<String, IrisMaterialPalette> fluids;
+    private final Map<String, String> seams;
+    private final int prefetchRings;
+    private final boolean persist;
+    private final long fingerprint;
+
+    private HydrologySettings(IrisHydrology config, long seed, int seaLevel, int minY, int maxY) {
+        this.seed = seed;
+        this.seaLevel = seaLevel;
+        this.minY = minY;
+        this.maxY = maxY;
+        this.enabled = config.isEnabled();
+        if (!Double.isFinite(config.getDensity()) || config.getDensity() < 0D || config.getDensity() > 1D) {
+            throw new IllegalArgumentException("Hydrology density must be within 0..1, got " + config.getDensity());
+        }
+        this.density = (float) config.getDensity();
+        this.climate = climate(config.getClimate());
+        this.drainage = drainage(config.getDrainage());
+        this.tiers = tiers(config.getTiers());
+        this.ponds = ponds(config.getPonds());
+        this.lakes = lakes(config.getLakes());
+        this.deformation = deformation(config.getDeformation());
+        this.underground = underground(config.getUnderground());
+        this.tidalTier = tidalTier(tiers.get(Math.min(TIDAL_BASE_TIER, tiers.size() - 1)), underground.seaInlets());
+        this.fluids = fluids(config.getFluids());
+        this.seams = seams(config.getFluids());
+        this.prefetchRings = config.getPrefetchRings();
+        this.persist = config.isPersist();
+        requireBounds(config);
+        requireFluidReferences();
+        this.fingerprint = computeFingerprint();
+    }
+
+    public static HydrologySettings compile(IrisHydrology config, long seed, int seaLevel, int minY, int maxY) {
+        return new HydrologySettings(Objects.requireNonNull(config, "config"), seed, seaLevel, minY, maxY);
+    }
+
+    public long fingerprint() {
+        return fingerprint;
+    }
+
+    public List<HydrologyTier> tiers() {
+        return tiers;
+    }
+
+    public HydrologyTier tidalTier() {
+        return tidalTier;
+    }
+
+    public HydrologyTier majorTier() {
+        return tiers.get(tiers.size() - 1);
+    }
+
+    public HydrologyTier tierFor(float catchment) {
+        for (int index = tiers.size() - 1; index > 0; index--) {
+            HydrologyTier tier = tiers.get(index);
+            if (catchment >= tier.minCatchment()) {
+                return tier;
+            }
+        }
+        return tiers.get(0);
+    }
+
+    public long seed() {
+        return seed;
+    }
+
+    public int seaLevel() {
+        return seaLevel;
+    }
+
+    public int minY() {
+        return minY;
+    }
+
+    public int maxY() {
+        return maxY;
+    }
+
+    public boolean enabled() {
+        return enabled;
+    }
+
+    public float density() {
+        return density;
+    }
+
+    public Climate climate() {
+        return climate;
+    }
+
+    public Drainage drainage() {
+        return drainage;
+    }
+
+    public Ponds ponds() {
+        return ponds;
+    }
+
+    public Lakes lakes() {
+        return lakes;
+    }
+
+    public Deformation deformation() {
+        return deformation;
+    }
+
+    public Underground underground() {
+        return underground;
+    }
+
+    public Map<String, IrisMaterialPalette> fluids() {
+        return fluids;
+    }
+
+    public Map<String, String> seams() {
+        return seams;
+    }
+
+    public int prefetchRings() {
+        return prefetchRings;
+    }
+
+    public boolean persist() {
+        return persist;
+    }
+
+    private static HydrologyTier tidalTier(HydrologyTier base, SeaInlets inlets) {
+        return new HydrologyTier(TIDAL_TIER_NAME, base.minCatchment(), inlets.meanderWidth(), inlets.meanderWidth(), 0f, base.depthRatio(), 0, false,
+                base.waterfallMinDrop(), base.stepHeight(), inlets.bankBand(), inlets.bankStyle(), new HydrologyTier.Estuary(0, 1f),
+                new HydrologyTier.Delta(0, 0f, 0), base.materials(), base.fluid(), base.decorators());
+    }
+
+    private static Climate climate(IrisHydrologyClimate config) {
+        Objects.requireNonNull(config, "Hydrology climate is missing");
+        IrisGeneratorStyle style = Objects.requireNonNull(config.getStyle(), "Hydrology climate.style is missing");
+        float dryness = unit(config.getDryness(), "climate.dryness");
+        float transition = unit(config.getTransition(), "climate.transition");
+        float dryRainfall = unit(config.getDryRainfall(), "climate.dryRainfall");
+        return new Climate(config.isEnabled(), style, dryness, transition, dryRainfall);
+    }
+
+    private static float unit(double value, String field) {
+        if (!Double.isFinite(value) || value < 0D || value > 1D) {
+            throw new IllegalArgumentException("Hydrology " + field + " must be within 0..1, got " + value);
+        }
+        return (float) value;
+    }
+
+    private static Drainage drainage(IrisHydrologyDrainage config) {
+        return new Drainage((float) config.getFillEpsilon(), config.getBreachDepth(), config.isWetnessThinning(),
+                (float) config.getMinHeadKeep(), (float) config.getHeadRelief(), (float) config.getSaturationCatchment());
+    }
+
+    private static List<HydrologyTier> tiers(List<IrisHydrologyTier> configs) {
+        if (configs == null || configs.isEmpty()) {
+            throw new IllegalArgumentException("Hydrology needs at least one tier");
+        }
+        List<HydrologyTier> compiled = new ArrayList<>(configs.size());
+        for (int index = 0; index < configs.size(); index++) {
+            compiled.add(tier(configs.get(index), "tiers[" + index + "]"));
+        }
+        compiled.sort(Comparator.comparingDouble(HydrologyTier::minCatchment));
+        requireDistinctCatchments(compiled);
+        requireNoStepUpstream(compiled);
+        return List.copyOf(compiled);
+    }
+
+    private static void requireDistinctCatchments(List<HydrologyTier> sorted) {
+        for (int index = 1; index < sorted.size(); index++) {
+            HydrologyTier lower = sorted.get(index - 1);
+            HydrologyTier upper = sorted.get(index);
+            if (lower.minCatchment() == upper.minCatchment()) {
+                throw new IllegalArgumentException("Hydrology tiers '" + lower.name() + "' and '" + upper.name()
+                        + "' share minCatchment " + upper.minCatchment() + "; every tier needs its own minCatchment");
+            }
+        }
+    }
+
+    private static void requireNoStepUpstream(List<HydrologyTier> sorted) {
+        for (int index = 1; index < sorted.size(); index++) {
+            HydrologyTier lower = sorted.get(index - 1);
+            HydrologyTier upper = sorted.get(index);
+            if (lower.stepHeight() > upper.stepHeight()) {
+                throw new IllegalArgumentException("Hydrology tier '" + lower.name() + "' has stepHeight " + lower.stepHeight() + " above the larger tier '"
+                        + upper.name() + "' with " + upper.stepHeight() + "; the water it feeds would stand above its own");
+            }
+        }
+    }
+
+    private static HydrologyTier tier(IrisHydrologyTier config, String field) {
+        FloatRange halfWidth = floatRange(config.getHalfWidth(), field + ".halfWidth", RangeFloor.POSITIVE);
+        if (halfWidth.max() > MAX_HALF_WIDTH) {
+            throw new IllegalArgumentException("Hydrology range " + field + ".halfWidth must not go above " + MAX_HALF_WIDTH + ", got "
+                    + config.getHalfWidth());
+        }
+        if (config.getBankBand() < 0 || config.getBankBand() > MAX_BANK_BAND) {
+            throw new IllegalArgumentException("Hydrology " + field + ".bankBand must stay within 0.." + MAX_BANK_BAND + ", got "
+                    + config.getBankBand());
+        }
+        return new HydrologyTier(config.getName(), (float) config.getMinCatchment(), halfWidth.min(), halfWidth.max(),
+                (float) config.getWidthFactor(), (float) config.getDepthRatio(), config.getInset(), config.isCascades(),
+                config.getWaterfallMinDrop(), config.getStepHeight(), config.getBankBand(), config.getBankStyle(),
+                estuary(config.getEstuary(), field + ".estuary"), delta(config, halfWidth.max(), field + ".delta"),
+                materials(config.getMaterials(), field + ".materials"), config.getFluid(), decorators(config.getDecorators(), field + ".decorators"));
+    }
+
+    private static HydrologyTier.Delta delta(IrisHydrologyTier tier, float maxHalfWidth, String field) {
+        IrisHydrologyDelta config = tier.getDelta();
+        String named = "Hydrology " + field + " of tier '" + tier.getName() + "'";
+        if (config == null) {
+            throw new IllegalArgumentException(named + " must be an object");
+        }
+        if (config.getChannels() != 0 && (config.getChannels() < MIN_DELTA_CHANNELS || config.getChannels() > MAX_DELTA_CHANNELS)) {
+            throw new IllegalArgumentException(named + " has channels " + config.getChannels() + "; a delta has 0 channels (none) or "
+                    + MIN_DELTA_CHANNELS + " to " + MAX_DELTA_CHANNELS);
+        }
+        if (!(config.getSpreadDegrees() >= MIN_DELTA_SPREAD && config.getSpreadDegrees() <= MAX_DELTA_SPREAD)) {
+            throw new IllegalArgumentException(named + " has spreadDegrees " + config.getSpreadDegrees() + "; it must stay within "
+                    + MIN_DELTA_SPREAD + ".." + MAX_DELTA_SPREAD);
+        }
+        if (config.getLength() < MIN_DELTA_LENGTH || config.getLength() > MAX_DELTA_LENGTH) {
+            throw new IllegalArgumentException(named + " has length " + config.getLength() + "; it must stay within "
+                    + MIN_DELTA_LENGTH + ".." + MAX_DELTA_LENGTH);
+        }
+        long extent = (long) config.getLength() + DELTA_STEP + (long) Math.ceil(maxHalfWidth) + tier.getBankBand() + 1L;
+        if (config.getChannels() > 0 && extent > WindowKey.SIZE) {
+            throw new IllegalArgumentException(named + " reaches " + extent + " blocks from its sea end (length " + config.getLength()
+                    + " + " + DELTA_STEP + " for the last step + halfWidth max " + maxHalfWidth + " + bankBand " + tier.getBankBand()
+                    + " + 1); a delta channel and its banks must stay within " + WindowKey.SIZE + " blocks");
+        }
+        return new HydrologyTier.Delta(config.getChannels(), (float) config.getSpreadDegrees(), config.getLength());
+    }
+
+    private static HydrologyTier.Estuary estuary(IrisHydrologyEstuary config, String field) {
+        if (config == null) {
+            throw new IllegalArgumentException("Hydrology " + field + " must be an object");
+        }
+        if (config.getLength() < 0 || config.getLength() > MAX_ESTUARY_LENGTH) {
+            throw new IllegalArgumentException("Hydrology " + field + ".length must stay within 0.." + MAX_ESTUARY_LENGTH + ", got "
+                    + config.getLength());
+        }
+        if (!(config.getFlare() >= 1D && config.getFlare() <= MAX_ESTUARY_FLARE)) {
+            throw new IllegalArgumentException("Hydrology " + field + ".flare must stay within 1.." + MAX_ESTUARY_FLARE + ", got "
+                    + config.getFlare());
+        }
+        return new HydrologyTier.Estuary(config.getLength(), (float) config.getFlare());
+    }
+
+    private static Ponds ponds(IrisHydrologyPonds config) {
+        IrisPondDams dams = config.getDams();
+        return new Ponds(naturalPonds(config.getNatural()), seededPonds(config.getSeeded()),
+                new PondDams(dams.isEnabled(), dams.getMaxRaise()),
+                intRange(config.getFreeboard(), "ponds.freeboard", RangeFloor.NON_NEGATIVE),
+                config.getDryDrawdown(), pondShore(config.getShore()), materials(config.getMaterials(), "ponds.materials"), config.getFluid(),
+                decorators(config.getDecorators(), "ponds.decorators"));
+    }
+
+    private static NaturalPonds naturalPonds(IrisPondNatural config) {
+        requireAreaOrder(config.getMinArea(), config.getMaxArea(), "ponds.natural");
+        return new NaturalPonds(config.isEnabled(), (float) config.getKeep(), config.getMinArea(), config.getMaxArea(),
+                (float) config.getMinDepth());
+    }
+
+    private static SeededPonds seededPonds(IrisPondSeeded config) {
+        return new SeededPonds(config.isEnabled(), (float) config.getDensity(),
+                intRange(config.getRadius(), "ponds.seeded.radius", RangeFloor.POSITIVE),
+                intRange(config.getDepth(), "ponds.seeded.depth", RangeFloor.POSITIVE),
+                (float) config.getMaxSlope(), config.isAlongChannels(),
+                intRange(config.getChannelSpacing(), "ponds.seeded.channelSpacing", RangeFloor.POSITIVE));
+    }
+
+    private static PondShore pondShore(IrisPondShore config) {
+        return new PondShore((float) config.getRoundness(), config.getShelf(), config.getTaper(), config.getMaxDepth());
+    }
+
+    private static Lakes lakes(IrisHydrologyLakes config) {
+        requireAreaOrder(config.getMinArea(), config.getMaxArea(), "lakes");
+        return new Lakes(config.isEnabled(), config.getMinArea(), config.getMaxArea());
+    }
+
+    private static Deformation deformation(IrisHydrologyDeformation config) {
+        return new Deformation(config.getMaxFill(), (float) config.getBankSlope(), (float) config.getBankSteepFactor(),
+                (float) config.getBankNoise(), config.isCaveMask());
+    }
+
+    private Underground underground(IrisHydrologyUnderground config) {
+        return new Underground(seaInlets(config.getSeaInlets()), grottos(config.getGrottos()), cavePools(config.getCavePools()), caveSprings(config.getCaveSprings()));
+    }
+
+    private Grottos grottos(IrisGrottos config) {
+        Grottos grottos = new Grottos(config.isEnabled(), config.getSpacing(),
+                floatRange(config.getRadius(), "underground.grottos.radius", RangeFloor.POSITIVE),
+                intRange(config.getHeadroom(), "underground.grottos.headroom", RangeFloor.POSITIVE),
+                floatRange(config.getMouthWidth(), "underground.grottos.mouthWidth", RangeFloor.POSITIVE),
+                intRange(config.getLength(), "underground.grottos.length", RangeFloor.POSITIVE), (float) config.getRoughness());
+        requireWithin(grottos.spacing(), MIN_GROTTO_SPACING, Integer.MAX_VALUE, "underground.grottos.spacing");
+        requireWithin(grottos.radius().min(), MIN_GROTTO_RADIUS, MAX_GROTTO_RADIUS, "underground.grottos.radius", config.getRadius());
+        requireWithin(grottos.radius().max(), MIN_GROTTO_RADIUS, MAX_GROTTO_RADIUS, "underground.grottos.radius", config.getRadius());
+        requireWithin(grottos.headroom().min(), MIN_GROTTO_HEADROOM, MAX_GROTTO_HEADROOM, "underground.grottos.headroom");
+        requireWithin(grottos.headroom().max(), MIN_GROTTO_HEADROOM, MAX_GROTTO_HEADROOM, "underground.grottos.headroom");
+        requireWithin(grottos.mouthWidth().min(), MIN_GROTTO_MOUTH, MAX_GROTTO_MOUTH, "underground.grottos.mouthWidth", config.getMouthWidth());
+        requireWithin(grottos.mouthWidth().max(), MIN_GROTTO_MOUTH, MAX_GROTTO_MOUTH, "underground.grottos.mouthWidth", config.getMouthWidth());
+        requireWithin(grottos.length().max(), 1, MAX_GROTTO_LENGTH, "underground.grottos.length");
+        requireScalarWithin(config.getRoughness(), 0D, 1D, "underground.grottos.roughness");
+        return grottos;
+    }
+
+    private SeaInlets seaInlets(IrisSeaInlets config) {
+        SeaInlets inlets = new SeaInlets(config.isEnabled(), config.getSpacing(),
+                intRange(config.getLength(), "underground.seaInlets.length", RangeFloor.POSITIVE),
+                config.getMaximumBankHeight(),
+                floatRange(config.getMouthHalfWidth(), "underground.seaInlets.mouthHalfWidth", RangeFloor.POSITIVE),
+                floatRange(config.getHeadHalfWidth(), "underground.seaInlets.headHalfWidth", RangeFloor.POSITIVE),
+                (float) config.getTaper(), (float) config.getWidthVariation(), (float) config.getMeanderWidth(),
+                intRange(config.getDepth(), "underground.seaInlets.depth", RangeFloor.POSITIVE),
+                config.getBankBand(), Objects.requireNonNull(config.getBankStyle(), "Hydrology underground.seaInlets.bankStyle is missing"));
+        requireWithin(inlets.mouthHalfWidth().min(), MIN_INLET_MOUTH, MAX_INLET_MOUTH, "underground.seaInlets.mouthHalfWidth", config.getMouthHalfWidth());
+        requireWithin(inlets.mouthHalfWidth().max(), MIN_INLET_MOUTH, MAX_INLET_MOUTH, "underground.seaInlets.mouthHalfWidth", config.getMouthHalfWidth());
+        requireWithin(inlets.headHalfWidth().min(), MIN_INLET_HEAD, MAX_INLET_HEAD, "underground.seaInlets.headHalfWidth", config.getHeadHalfWidth());
+        requireWithin(inlets.headHalfWidth().max(), MIN_INLET_HEAD, MAX_INLET_HEAD, "underground.seaInlets.headHalfWidth", config.getHeadHalfWidth());
+        requireWithin(inlets.depth().min(), MIN_INLET_DEPTH, MAX_INLET_DEPTH, "underground.seaInlets.depth", config.getDepth());
+        requireWithin(inlets.depth().max(), MIN_INLET_DEPTH, MAX_INLET_DEPTH, "underground.seaInlets.depth", config.getDepth());
+        requireWithin(inlets.maximumBankHeight(), MIN_INLET_BANK_HEIGHT, MAX_INLET_BANK_HEIGHT, "underground.seaInlets.maximumBankHeight");
+        requireScalarWithin(config.getTaper(), MIN_INLET_TAPER, MAX_INLET_TAPER, "underground.seaInlets.taper");
+        requireScalarWithin(config.getWidthVariation(), 0D, MAX_INLET_WIDTH_VARIATION, "underground.seaInlets.widthVariation");
+        requireScalarWithin(config.getMeanderWidth(), MIN_INLET_MEANDER_WIDTH, MAX_INLET_MEANDER_WIDTH, "underground.seaInlets.meanderWidth");
+        requireWithin(inlets.bankBand(), MIN_INLET_BANK_BAND, MAX_INLET_BANK_BAND, "underground.seaInlets.bankBand");
+        if (inlets.mouthHalfWidth().min() < inlets.headHalfWidth().max()) {
+            throw new IllegalArgumentException("Hydrology underground.seaInlets.mouthHalfWidth min " + inlets.mouthHalfWidth().min()
+                    + " must not be below headHalfWidth max " + inlets.headHalfWidth().max() + ": an inlet narrows inland");
+        }
+        if (inlets.enabled() && seaLevel > minY && seaLevel - inlets.depth().max() - 1 <= minY) {
+            throw new IllegalArgumentException("Hydrology underground.seaInlets.depth max " + inlets.depth().max()
+                    + " puts the inlet floor below the world bottom " + minY + " (sea level " + seaLevel + ")");
+        }
+        long meander = (long) Math.ceil(Math.min(INLET_MEANDER_MAX, INLET_MEANDER_SCALE * (inlets.meanderWidth() + 1f)));
+        long extent = (long) inlets.length().max() + INLET_LAST_STEP + meander + (long) Math.ceil(inlets.mouthHalfWidth().max()) + inlets.bankBand();
+        if (extent > WindowKey.SIZE) {
+            throw new IllegalArgumentException("Hydrology underground.seaInlets reach " + extent + " blocks from the coast (length max "
+                    + inlets.length().max() + " + " + INLET_LAST_STEP + " for the last step + " + meander + " for the meander + mouthHalfWidth max "
+                    + inlets.mouthHalfWidth().max() + " + bankBand " + inlets.bankBand() + "); an inlet must stay within " + WindowKey.SIZE + " blocks");
+        }
+        return inlets;
+    }
+
+    private static void requireScalarWithin(double value, double min, double max, String field) {
+        if (!Double.isFinite(value) || value < min || value > max) {
+            throw new IllegalArgumentException("Hydrology " + field + " must stay within " + min + ".." + max + ", got " + value);
+        }
+    }
+
+    private static void requireWithin(double value, double min, double max, String field, List<? extends Number> written) {
+        if (value < min || value > max) {
+            throw new IllegalArgumentException("Hydrology range " + field + " must stay within " + min + ".." + max + ", got " + written);
+        }
+    }
+
+    private static CavePools cavePools(IrisCavePools config) {
+        requireAreaOrder(config.getMinArea(), config.getMaxArea(), "underground.cavePools");
+        if (config.isEnabled() && (config.getRadius() < 1 || config.getRadius() > MAX_CAVE_POOL_RADIUS)) {
+            throw new IllegalArgumentException("Hydrology underground.cavePools.radius must stay within 1.." + MAX_CAVE_POOL_RADIUS
+                    + ", got " + config.getRadius());
+        }
+        if (config.isEnabled() && config.getMaxDepth() < 1) {
+            throw new IllegalArgumentException("Hydrology underground.cavePools.maxDepth must be at least 1, got " + config.getMaxDepth());
+        }
+        return new CavePools(config.isEnabled(), (float) config.getDensity(), config.getMinArea(), config.getMaxArea(),
+                config.getMaxDepth(), config.getRadius(),
+                intRange(config.getFreeboard(), "underground.cavePools.freeboard", RangeFloor.NON_NEGATIVE),
+                config.getFluid(), blankToNull(config.getDeepFluid()), config.getDeepFluidMaxY());
+    }
+
+    private static CaveSprings caveSprings(IrisCaveSprings config) {
+        if (config.isEnabled()) {
+            if (!(Double.isFinite(config.getDensity()) && config.getDensity() >= 0D && config.getDensity() <= MAX_SPRING_DENSITY)) {
+                throw new IllegalArgumentException("Hydrology underground.caveSprings.density must stay within 0.." + MAX_SPRING_DENSITY
+                        + ", got " + config.getDensity());
+            }
+            requireWithin(config.getMinDepthBelowSurface(), 0, MAX_SPRING_DEPTH, "underground.caveSprings.minDepthBelowSurface");
+        }
+        return new CaveSprings(config.isEnabled(), (float) config.getDensity(), config.getFluid(), config.getMinDepthBelowSurface());
+    }
+
+    private static String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private static Map<String, IrisMaterialPalette> fluids(List<IrisFluidProfile> profiles) {
+        Map<String, IrisMaterialPalette> compiled = new LinkedHashMap<>();
+        for (int index = 0; index < profiles.size(); index++) {
+            IrisFluidProfile profile = profiles.get(index);
+            String field = "fluids[" + index + "]";
+            if (compiled.containsKey(profile.getName())) {
+                throw new IllegalArgumentException("Duplicate hydrology fluid profile '" + profile.getName() + "' in " + field + ".name");
+            }
+            compiled.put(profile.getName(), requirePalette(profile, field + ".palette"));
+        }
+        return Collections.unmodifiableMap(compiled);
+    }
+
+    private static Map<String, String> seams(List<IrisFluidProfile> profiles) {
+        Map<String, String> seams = new LinkedHashMap<>();
+        for (IrisFluidProfile profile : profiles) {
+            if (profile.getSeam() != null && !profile.getSeam().isBlank()) {
+                seams.put(profile.getName(), profile.getSeam());
+            }
+        }
+        return Collections.unmodifiableMap(seams);
+    }
+
+    private static IrisMaterialPalette requirePalette(IrisFluidProfile profile, String field) {
+        IrisMaterialPalette palette = profile.getPalette();
+        if (palette == null || unwritten(palette)) {
+            throw new IllegalArgumentException("Hydrology fluid profile '" + profile.getName() + "' has no blocks in " + field
+                    + ": its \"palette\" list is missing, misspelt or empty; write it as a palette object such as"
+                    + " {\"palette\": [{\"block\": \"minecraft:water\"}]}");
+        }
+        return copy(palette, IrisMaterialPalette.class);
+    }
+
+    private static IrisHydrologyMaterials materials(IrisHydrologyMaterials config, String field) {
+        if (config == null) {
+            return null;
+        }
+        requireWrittenPalette(config.getBed(), field + ".bed");
+        requireWrittenPalette(config.getShore(), field + ".shore");
+        requireWrittenPalette(config.getBank(), field + ".bank");
+        return copy(config, IrisHydrologyMaterials.class);
+    }
+
+    private static List<IrisDecorator> decorators(List<IrisDecorator> configs, String field) {
+        requireDecorators(configs, "Hydrology " + field);
+        if (configs == null) {
+            return List.of();
+        }
+        List<IrisDecorator> compiled = new ArrayList<>(configs.size());
+        for (IrisDecorator decorator : configs) {
+            compiled.add(copy(decorator, IrisDecorator.class));
+        }
+        return List.copyOf(compiled);
+    }
+
+    public static void requireDecorators(List<IrisDecorator> decorators, String path) {
+        if (decorators == null) {
+            return;
+        }
+        for (int index = 0; index < decorators.size(); index++) {
+            requireDecorator(decorators.get(index), path + "[" + index + "]");
+        }
+    }
+
+    private static void requireDecorator(IrisDecorator decorator, String path) {
+        if (decorator == null) {
+            throw new IllegalArgumentException(path + " is empty; write it as a decorator object");
+        }
+        IrisDecorationPart part = decorator.getPartOf();
+        boolean water = part == IrisDecorationPart.SEA_FLOOR || part == IrisDecorationPart.SEA_SURFACE || part == IrisDecorationPart.SHORE_LINE;
+        if (!water) {
+            throw new IllegalArgumentException(path + ".partOf is " + part + "; water decorators grow on SEA_FLOOR (the bed under the water),"
+                    + " SEA_SURFACE (still water) or SHORE_LINE (dry ground beside the water)");
+        }
+        if (decorator.getPalette() == null || decorator.getPalette().isEmpty()) {
+            throw new IllegalArgumentException(path + ".palette has no blocks: its list is empty;"
+                    + " write it as [{\"block\": \"minecraft:seagrass\"}]");
+        }
+        if (new IrisDecorator().getPalette().equals(decorator.getPalette())) {
+            throw new IllegalArgumentException(path + ".palette is missing or misspelt, so it would grow the default 'grass';"
+                    + " write it as [{\"block\": \"minecraft:seagrass\"}], naming grass as minecraft:short_grass");
+        }
+        requireBlockNames(decorator.getPalette(), path + ".palette");
+        requireBlockNames(decorator.getTopPalette(), path + ".topPalette");
+        requireBlockNames(decorator.getWhitelist(), path + ".whitelist");
+        requireBlockNames(decorator.getBlacklist(), path + ".blacklist");
+        if (decorator.getForceBlock() != null) {
+            throw new IllegalArgumentException(path + ".forceBlock is not allowed: it would replace the ground that holds the water");
+        }
+        if (!(decorator.getChance() >= 0D && decorator.getChance() <= 1D)) {
+            throw new IllegalArgumentException(path + ".chance must stay within 0..1, got " + decorator.getChance());
+        }
+        if (decorator.getStackMin() < 1 || decorator.getStackMin() > decorator.getStackMax()) {
+            throw new IllegalArgumentException(path + " needs 1 <= stackMin <= stackMax, got stackMin " + decorator.getStackMin()
+                    + " and stackMax " + decorator.getStackMax());
+        }
+    }
+
+    private static void requireBlockNames(List<IrisBlockData> blocks, String path) {
+        if (blocks == null) {
+            return;
+        }
+        for (int index = 0; index < blocks.size(); index++) {
+            IrisBlockData block = blocks.get(index);
+            if (block == null || block.getBlock() == null || block.getBlock().isBlank()) {
+                throw new IllegalArgumentException(path + "[" + index + "] names no block");
+            }
+        }
+    }
+
+    private static void requireWrittenPalette(IrisMaterialPalette palette, String field) {
+        if (palette != null && unwritten(palette)) {
+            throw new IllegalArgumentException("Hydrology " + field + " has no blocks: its \"palette\" list is missing, misspelt or empty;"
+                    + " write it as {\"palette\": [{\"block\": \"minecraft:sand\"}]} or leave it unset to keep the biome's layers");
+        }
+    }
+
+    private static boolean unwritten(IrisMaterialPalette palette) {
+        return palette.getPalette() == null || palette.getPalette().isEmpty() || palette.isFallbackPalette();
+    }
+
+    private static <T> T copy(T value, Class<T> type) {
+        return PALETTE_JSON.fromJson(PALETTE_JSON.toJson(value), type);
+    }
+
+    private static void requireAreaOrder(int minArea, int maxArea, String field) {
+        if (minArea > maxArea) {
+            throw new IllegalArgumentException("Hydrology " + field + ".minArea " + minArea + " is above " + field + ".maxArea " + maxArea);
+        }
+    }
+
+    private static FloatRange floatRange(List<Double> values, String field, RangeFloor floor) {
+        requirePair(values, field, floor);
+        return new FloatRange(values.get(0).floatValue(), values.get(1).floatValue());
+    }
+
+    private static IntRange intRange(List<Integer> values, String field, RangeFloor floor) {
+        requirePair(values, field, floor);
+        return new IntRange(values.get(0), values.get(1));
+    }
+
+    private static void requirePair(List<? extends Number> values, String field, RangeFloor floor) {
+        if (values == null || values.size() != 2 || values.get(0) == null || values.get(1) == null) {
+            throw new IllegalArgumentException("Hydrology range " + field + " must be written as [min, max], got " + values);
+        }
+        double min = values.get(0).doubleValue();
+        if (min > values.get(1).doubleValue()) {
+            throw new IllegalArgumentException("Hydrology range " + field + " has its min above its max: " + values);
+        }
+        boolean belowFloor = switch (floor) {
+            case NON_NEGATIVE -> min < 0D;
+            case POSITIVE -> min <= 0D;
+        };
+        if (belowFloor) {
+            throw new IllegalArgumentException("Hydrology range " + field + " must " + floor.requirement + ", got " + values);
+        }
+    }
+
+    private void requireBounds(IrisHydrology config) {
+        requireWithin(prefetchRings, 0, MAX_PREFETCH_RINGS, "prefetchRings");
+        requirePositive(drainage.fillEpsilon(), "drainage.fillEpsilon");
+        for (int index = 0; index < config.getTiers().size(); index++) {
+            requireTierBounds(config.getTiers().get(index), "tiers[" + index + "]");
+        }
+        double seeded = config.getPonds().getSeeded().getDensity();
+        if (!(seeded >= 0D && seeded <= MAX_SEEDED_DENSITY)) {
+            throw new IllegalArgumentException("Hydrology ponds.seeded.density must stay within 0.." + MAX_SEEDED_DENSITY + ", got " + seeded);
+        }
+        requireShoreDepth(ponds.materials(), "ponds.materials");
+        requireAtLeast(deformation.maxFill(), 0, "deformation.maxFill");
+        if (lakes.maxArea() > MAX_LAKE_AREA) {
+            throw new IllegalArgumentException("Hydrology lakes.maxArea must not go above " + MAX_LAKE_AREA + " (" + LakeCandidate.MAX_EXTENT
+                    + " by " + LakeCandidate.MAX_EXTENT + " blocks, the widest a lake can span), got " + lakes.maxArea());
+        }
+        requireAtLeast(underground.seaInlets().spacing(), 1, "underground.seaInlets.spacing");
+        requireCavePoolBounds(underground.cavePools());
+    }
+
+    private static void requireTierBounds(IrisHydrologyTier config, String field) {
+        requireNonNegative(config.getWidthFactor(), field + ".widthFactor");
+        requireNonNegative(config.getDepthRatio(), field + ".depthRatio");
+        requireAtLeast(config.getWaterfallMinDrop(), MIN_WATERFALL_DROP, field + ".waterfallMinDrop");
+        requireWithin(config.getStepHeight(), 1, WaterHeads.STANDING_STEP, field + ".stepHeight");
+        requireShoreDepth(config.getMaterials(), field + ".materials");
+    }
+
+    private static void requireShoreDepth(IrisHydrologyMaterials materials, String field) {
+        if (materials != null) {
+            requireAtLeast(materials.getShoreDepth(), 1, field + ".shoreDepth");
+        }
+    }
+
+    private static void requireCavePoolBounds(CavePools pools) {
+        if (!pools.enabled()) {
+            return;
+        }
+        if (pools.deepFluid() != null) {
+            requireWithin(pools.deepFluidMaxY(), MIN_DEEP_FLUID_Y, MAX_DEEP_FLUID_Y, "underground.cavePools.deepFluidMaxY");
+        }
+        if (pools.freeboard().max() >= pools.maxDepth()) {
+            throw new IllegalArgumentException("Hydrology underground.cavePools.freeboard max " + pools.freeboard().max()
+                    + " must stay below maxDepth " + pools.maxDepth());
+        }
+        if (pools.maxArea() > MAX_CAVE_POOL_AREA) {
+            throw new IllegalArgumentException("Hydrology underground.cavePools.maxArea must not go above " + MAX_CAVE_POOL_AREA + " ("
+                    + CAVE_POOL_SPAN + " by " + CAVE_POOL_SPAN + " blocks, the widest a pool can spread), got " + pools.maxArea());
+        }
+    }
+
+    private static void requireWithin(int value, int min, int max, String field) {
+        if (value < min || value > max) {
+            throw new IllegalArgumentException("Hydrology " + field + " must stay within " + min + ".." + max + ", got " + value);
+        }
+    }
+
+    private static void requireAtLeast(int value, int min, String field) {
+        if (value < min) {
+            throw new IllegalArgumentException("Hydrology " + field + " must be at least " + min + ", got " + value);
+        }
+    }
+
+    private static void requireNonNegative(double value, String field) {
+        if (!(Double.isFinite(value) && value >= 0D)) {
+            throw new IllegalArgumentException("Hydrology " + field + " must be a finite value of at least 0, got " + value);
+        }
+    }
+
+    private static void requirePositive(float value, String field) {
+        if (!(Float.isFinite(value) && value > 0f)) {
+            throw new IllegalArgumentException("Hydrology " + field + " must be a finite value above 0, got " + value);
+        }
+    }
+
+    private void requireFluidReferences() {
+        for (Map.Entry<String, String> seam : seams.entrySet()) {
+            requireFluid(seam.getValue(), "the seam of fluid '" + seam.getKey() + "'");
+            if (seams.containsKey(seam.getValue())) {
+                throw new IllegalArgumentException("Hydrology fluid '" + seam.getValue() + "' is the seam of fluid '" + seam.getKey()
+                        + "' and cannot name a seam of its own");
+            }
+        }
+        for (HydrologyTier tier : tiers) {
+            requireFillingFluid(tier.fluid(), "the fluid of tier '" + tier.name() + "'");
+        }
+        requireFillingFluid(ponds.fluid(), "ponds.fluid");
+        requireFillingFluid(underground.cavePools().fluid(), "underground.cavePools.fluid");
+        if (underground.cavePools().deepFluid() != null) {
+            requireFillingFluid(underground.cavePools().deepFluid(), "underground.cavePools.deepFluid");
+        }
+        if (underground.caveSprings().enabled()) {
+            requireFillingFluid(underground.caveSprings().fluid(), "underground.caveSprings.fluid");
+        }
+    }
+
+    public void requireFillingFluid(String name, String field) {
+        requireFluid(name, field);
+        if (seams.containsValue(name)) {
+            throw new IllegalArgumentException("Hydrology fluid '" + name + "' in " + field
+                    + " is a seam profile; seams only line the edges of other fluids");
+        }
+    }
+
+    private void requireFluid(String name, String field) {
+        if (!fluids.containsKey(name)) {
+            throw new IllegalArgumentException("Unknown hydrology fluid profile '" + name + "' in " + field + "; fluids defines " + fluids.keySet());
+        }
+    }
+
+    private long computeFingerprint() {
+        Fingerprint hash = new Fingerprint().add(seed).add(seaLevel).add(minY).add(maxY).add(enabled).add(density);
+        addClimate(hash);
+        addDrainage(hash);
+        addTiers(hash);
+        addPonds(hash);
+        addLakesAndDeformation(hash);
+        addUnderground(hash);
+        addFluids(hash);
+        return hash.value();
+    }
+
+    private void addClimate(Fingerprint hash) {
+        if (climate.enabled()) {
+            hash.add(true).add(PALETTE_JSON.toJson(climate.style())).add(climate.dryness()).add(climate.transition()).add(climate.dryRainfall());
+        }
+    }
+
+    private void addDrainage(Fingerprint hash) {
+        hash.add(drainage.fillEpsilon()).add(drainage.breachDepth()).add(drainage.wetnessThinning())
+                .add(drainage.minHeadKeep()).add(drainage.headRelief()).add(drainage.saturationCatchment());
+    }
+
+    private void addTiers(Fingerprint hash) {
+        hash.add(tiers.size());
+        for (HydrologyTier tier : tiers) {
+            hash.add(tier.name()).add(tier.minCatchment()).add(tier.minHalfWidth()).add(tier.maxHalfWidth())
+                    .add(tier.widthFactor()).add(tier.depthRatio()).add(tier.inset()).add(tier.cascades())
+                    .add(tier.waterfallMinDrop()).add(tier.stepHeight()).add(tier.bankBand()).add(tier.bankStyle())
+                    .add(tier.estuary().length()).add(tier.estuary().flare())
+                    .add(tier.delta().channels()).add(tier.delta().spreadDegrees()).add(tier.delta().length())
+                    .add(tier.materials()).add(tier.fluid());
+        }
+    }
+
+    private void addPonds(Fingerprint hash) {
+        NaturalPonds natural = ponds.natural();
+        SeededPonds seeded = ponds.seeded();
+        PondShore shore = ponds.shore();
+        hash.add(natural.enabled()).add(natural.keep()).add(natural.minArea()).add(natural.maxArea())
+                .add(natural.minDepth())
+                .add(seeded.enabled()).add(seeded.density()).add(seeded.radius()).add(seeded.depth())
+                .add(seeded.maxSlope()).add(seeded.alongChannels()).add(seeded.channelSpacing())
+                .add(ponds.dams().enabled()).add(ponds.dams().maxRaise())
+                .add(ponds.freeboard()).add(ponds.dryDrawdown())
+                .add(shore.roundness()).add(shore.shelf()).add(shore.taper()).add(shore.maxDepth())
+                .add(ponds.materials()).add(ponds.fluid());
+    }
+
+    private void addLakesAndDeformation(Fingerprint hash) {
+        hash.add(lakes.enabled()).add(lakes.minArea()).add(lakes.maxArea())
+                .add(deformation.maxFill()).add(deformation.bankSlope()).add(deformation.bankSteepFactor())
+                .add(deformation.bankNoise()).add(deformation.caveMask());
+    }
+
+    private void addUnderground(Fingerprint hash) {
+        SeaInlets inlets = underground.seaInlets();
+        Grottos grottos = underground.grottos();
+        CavePools pools = underground.cavePools();
+        CaveSprings springs = underground.caveSprings();
+        hash.add(grottos.enabled()).add(grottos.spacing()).add(grottos.radius()).add(grottos.headroom()).add(grottos.mouthWidth())
+                .add(grottos.length()).add(grottos.roughness());
+        hash.add(inlets.enabled()).add(inlets.spacing()).add(inlets.length()).add(inlets.maximumBankHeight())
+                .add(inlets.mouthHalfWidth()).add(inlets.headHalfWidth()).add(inlets.taper()).add(inlets.widthVariation())
+                .add(inlets.meanderWidth()).add(inlets.depth()).add(inlets.bankBand()).add(inlets.bankStyle())
+                .add(pools.enabled()).add(pools.density()).add(pools.minArea()).add(pools.maxArea())
+                .add(pools.maxDepth()).add(pools.radius()).add(pools.freeboard()).add(pools.fluid())
+                .add(pools.deepFluid()).add(pools.deepFluidMaxY())
+                .add(springs.enabled()).add(springs.density()).add(springs.fluid()).add(springs.minDepthBelowSurface());
+    }
+
+    private void addFluids(Fingerprint hash) {
+        hash.add(fluids.size());
+        for (Map.Entry<String, IrisMaterialPalette> fluid : fluids.entrySet()) {
+            hash.add(fluid.getKey()).add(fluid.getValue());
+        }
+    }
+
+    public record FloatRange(float min, float max) {
+    }
+
+    public record IntRange(int min, int max) {
+    }
+
+    public record Climate(boolean enabled, IrisGeneratorStyle style, float dryness, float transition, float dryRainfall) {
+        public double wetness(double noise) {
+            if (!enabled || dryness <= 0f) {
+                return 1D;
+            }
+            double half = 0.5D * transition;
+            double share;
+            if (half <= 0D) {
+                share = noise < dryness ? 0D : 1D;
+            } else {
+                double t = Math.clamp((noise - dryness + half) / transition, 0D, 1D);
+                share = t * t * (3D - 2D * t);
+            }
+            return dryRainfall + (1D - dryRainfall) * share;
+        }
+    }
+
+    public record Drainage(float fillEpsilon, int breachDepth, boolean wetnessThinning, float minHeadKeep, float headRelief,
+                           float saturationCatchment) {
+    }
+
+    public record NaturalPonds(boolean enabled, float keep, int minArea, int maxArea, float minDepth) {
+    }
+
+    public record SeededPonds(boolean enabled, float density, IntRange radius, IntRange depth, float maxSlope,
+                              boolean alongChannels, IntRange channelSpacing) {
+    }
+
+    public record PondDams(boolean enabled, int maxRaise) {
+    }
+
+    public record PondShore(float roundness, int shelf, int taper, int maxDepth) {
+    }
+
+    public record Ponds(NaturalPonds natural, SeededPonds seeded, PondDams dams, IntRange freeboard,
+                        int dryDrawdown, PondShore shore, IrisHydrologyMaterials materials, String fluid,
+                        List<IrisDecorator> decorators) {
+    }
+
+    public record Lakes(boolean enabled, int minArea, int maxArea) {
+    }
+
+    public record Deformation(int maxFill, float bankSlope, float bankSteepFactor, float bankNoise, boolean caveMask) {
+    }
+
+    public record SeaInlets(boolean enabled, int spacing, IntRange length, int maximumBankHeight, FloatRange mouthHalfWidth,
+                            FloatRange headHalfWidth, float taper, float widthVariation, float meanderWidth, IntRange depth, int bankBand,
+                            IrisBankStyle bankStyle) {
+    }
+
+    public record Grottos(boolean enabled, int spacing, FloatRange radius, IntRange headroom, FloatRange mouthWidth, IntRange length, float roughness) {
+    }
+
+    public record CavePools(boolean enabled, float density, int minArea, int maxArea, int maxDepth, int radius,
+                            IntRange freeboard, String fluid, String deepFluid, int deepFluidMaxY) {
+    }
+
+    public record CaveSprings(boolean enabled, float density, String fluid, int minDepthBelowSurface) {
+    }
+
+    public record Underground(SeaInlets seaInlets, Grottos grottos, CavePools cavePools, CaveSprings caveSprings) {
+    }
+
+    private enum RangeFloor {
+        NON_NEGATIVE("not go below 0"),
+        POSITIVE("stay above 0");
+
+        private final String requirement;
+
+        RangeFloor(String requirement) {
+            this.requirement = requirement;
+        }
+    }
+
+    private static final class Fingerprint {
+        private static final long SEED = 0x48594452534554L;
+        private static final long GOLDEN = 0x9e3779b97f4a7c15L;
+        private static final long ABSENT = 0x5bd1e9955bd1e995L;
+        private static final long PRESENT = 0x27d4eb2f165667c5L;
+        private static final long FNV_OFFSET = 0xcbf29ce484222325L;
+        private static final long FNV_PRIME = 0x100000001b3L;
+
+        private long hash = SEED;
+
+        private Fingerprint add(long value) {
+            hash = avalanche(hash ^ avalanche(value + GOLDEN));
+            return this;
+        }
+
+        private Fingerprint add(float value) {
+            return add(Float.floatToIntBits(value));
+        }
+
+        private Fingerprint add(boolean value) {
+            return add(value ? 1L : 0L);
+        }
+
+        private Fingerprint add(String value) {
+            if (value == null) {
+                return add(ABSENT);
+            }
+            long text = FNV_OFFSET;
+            for (int index = 0; index < value.length(); index++) {
+                text = (text ^ value.charAt(index)) * FNV_PRIME;
+            }
+            return add(value.length()).add(text);
+        }
+
+        private Fingerprint add(Enum<?> value) {
+            return add(value == null ? null : value.name());
+        }
+
+        private Fingerprint add(IntRange range) {
+            return add(range.min()).add(range.max());
+        }
+
+        private Fingerprint add(FloatRange range) {
+            return add(range.min()).add(range.max());
+        }
+
+        private Fingerprint add(IrisMaterialPalette palette) {
+            return add(palette == null ? null : PALETTE_JSON.toJson(palette));
+        }
+
+        private Fingerprint add(IrisHydrologyMaterials materials) {
+            if (materials == null) {
+                return add(ABSENT);
+            }
+            return add(PRESENT).add(materials.getBed()).add(materials.getShore()).add(materials.getShoreDepth())
+                    .add(materials.getBank()).add(materials.isAllowGravityBlocks());
+        }
+
+        private long value() {
+            return hash;
+        }
+
+        private static long avalanche(long value) {
+            long mixed = (value ^ (value >>> 30)) * 0xbf58476d1ce4e5b9L;
+            mixed = (mixed ^ (mixed >>> 27)) * 0x94d049bb133111ebL;
+            return mixed ^ (mixed >>> 31);
+        }
+    }
+}

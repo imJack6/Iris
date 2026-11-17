@@ -1,0 +1,111 @@
+import groovy.json.JsonSlurper
+
+List<String> sourceOverlays = (List<String>) irisModTarget.overlays
+List<File> adapterSourceRoots = [projectDir, file('../modded-common'), file('../client-common')]
+int testForks = Math.max(1, Integer.parseInt(providers.gradleProperty('testForks').getOrElse('2')))
+
+tasks.named('compileTestJava', JavaCompile).configure {
+    options.release.set((int) irisModTarget.java)
+}
+tasks.withType(Test).configureEach {
+    maxParallelForks = Math.min(Runtime.runtime.availableProcessors(),
+        Math.min(gradle.startParameter.maxWorkerCount, testForks))
+    if (gradle.extensions.extraProperties.has('irisBuildLane')) {
+        jvmArgs('-XX:ParallelGCThreads=2', '-XX:ConcGCThreads=1', '-XX:CICompilerCount=2')
+    }
+    javaLauncher.set(javaToolchains.launcherFor {
+        languageVersion = JavaLanguageVersion.of((int) irisModTarget.java)
+    })
+}
+
+Closure<List<File>> overlayDirectories = { File adapter, String kind ->
+    sourceOverlays.collect { String overlay -> new File(adapter, "src/versions/${overlay}/${kind}") }
+}
+Closure<Integer> overlayOrigin = { List<File> overlays, String path ->
+    for (int index = overlays.size() - 1; index >= 0; index--) {
+        if (new File(overlays.get(index), path).isFile()) {
+            return index
+        }
+    }
+    return -1
+}
+
+['java', 'resources'].each { String kind ->
+    if (!adapterSourceRoots.any { File adapter -> overlayDirectories(adapter, kind).any { File directory -> directory.isDirectory() } }) {
+        return
+    }
+    TaskProvider<Sync> prepareSources = tasks.register("prepareVersion${kind.capitalize()}", Sync) {
+        adapterSourceRoots.each { File adapter ->
+            List<File> overlays = overlayDirectories(adapter, kind)
+            from(new File(adapter, "src/main/${kind}")) {
+                exclude { FileTreeElement entry -> overlayOrigin(overlays, entry.path) >= 0 }
+            }
+            overlays.eachWithIndex { File overlay, int index ->
+                from(overlay) {
+                    exclude { FileTreeElement entry -> !entry.directory && overlayOrigin(overlays, entry.path) != index }
+                }
+            }
+        }
+        includeEmptyDirs = false
+        into(layout.buildDirectory.dir("generated/sources/iris/${kind}"))
+    }
+    Set<File> replacedRoots = adapterSourceRoots.collect { File adapter ->
+        new File(adapter, "src/main/${kind}").canonicalFile
+    }.toSet()
+    List<Object> retainedRoots = sourceSets.main."${kind}".srcDirs.findAll { File source ->
+        !replacedRoots.contains(source.canonicalFile)
+    }.toList()
+    sourceSets.main."${kind}".setSrcDirs(retainedRoots + [prepareSources])
+    tasks.named('verifyLoggingPolicy').configure { dependsOn(prepareSources) }
+    tasks.named('verifyNativeBoundary').configure { dependsOn(prepareSources) }
+}
+
+List<File> testRulesFiles = sourceOverlays.collect { String overlay ->
+    file("../modded-common/src/versions/${overlay}/test/source-replacements.json")
+}
+boolean testOverlays = testRulesFiles.any { File rules -> rules.isFile() } || adapterSourceRoots.any { File adapter ->
+    overlayDirectories(adapter, 'test/java').any { File directory -> directory.isDirectory() }
+}
+if (testOverlays) {
+    List<Map<String, Object>> testRules = testRulesFiles.collect { File rules ->
+        rules.isFile() ? (Map<String, Object>) new JsonSlurper().parse(rules) : [:]
+    }
+    TaskProvider<Sync> prepareTests = tasks.register('prepareVersionTests', Sync) {
+        testRulesFiles.findAll { File rules -> rules.isFile() }.each { File rules -> inputs.file(rules) }
+        adapterSourceRoots.each { File adapter ->
+            List<File> overlays = overlayDirectories(adapter, 'test/java')
+            from(new File(adapter, 'src/test/java')) {
+                exclude { FileTreeElement entry -> overlayOrigin(overlays, entry.path) >= 0 }
+            }
+            overlays.eachWithIndex { File overlay, int index ->
+                from(overlay) {
+                    exclude { FileTreeElement entry -> !entry.directory && overlayOrigin(overlays, entry.path) != index }
+                }
+            }
+        }
+        includeEmptyDirs = false
+        into(layout.buildDirectory.dir('generated/sources/iris/test'))
+        doLast {
+            project.fileTree(destinationDir).matching { include('**/*.java') }.each { File source ->
+                String path = destinationDir.toPath().relativize(source.toPath()).toString().replace(File.separator, '/')
+                int origin = adapterSourceRoots.collect { File adapter ->
+                    overlayOrigin(overlayDirectories(adapter, 'test/java'), path)
+                }.max()
+                String content = source.getText('UTF-8')
+                String rewritten = content
+                for (int index = origin + 1; index < testRules.size(); index++) {
+                    Map<String, Object> replacements = testRules.get(index)
+                    List<Map<String, String>> rules = (List<Map<String, String>>) (replacements.get('global') ?: [])
+                    Map<String, List<Map<String, String>>> fileRules = (Map<String, List<Map<String, String>>>) (replacements.get('files') ?: [:])
+                    for (Map<String, String> rule : rules + (fileRules.get(path) ?: [])) {
+                        rewritten = rewritten.replaceAll(rule.pattern, rule.replacement)
+                    }
+                }
+                if (content != rewritten) {
+                    source.setText(rewritten, 'UTF-8')
+                }
+            }
+        }
+    }
+    sourceSets.test.java.setSrcDirs([prepareTests])
+}

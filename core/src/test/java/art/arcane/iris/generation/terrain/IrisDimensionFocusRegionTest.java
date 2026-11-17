@@ -1,0 +1,142 @@
+package art.arcane.iris.generation.terrain;
+
+import art.arcane.iris.generation.biome.IrisBiome;
+import art.arcane.iris.generation.hydrology.config.IrisHydrology;
+import art.arcane.iris.generation.hydrology.config.IrisHydrologyPolicy;
+
+import art.arcane.iris.pack.loading.IrisData;
+import art.arcane.iris.pack.loading.ResourceLoader;
+import art.arcane.volmlib.util.collection.KList;
+import org.junit.Before;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+
+import java.util.Set;
+import java.util.List;
+import java.util.stream.Collectors;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertSame;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
+
+public class IrisDimensionFocusRegionTest {
+    @Rule
+    public TemporaryFolder temporary = new TemporaryFolder();
+
+    private IrisData data;
+    private ResourceLoader<IrisBiome> biomes;
+    private ResourceLoader<IrisRegion> regions;
+    private IrisDimension dimension;
+
+    @Before
+    @SuppressWarnings("unchecked")
+    public void preparePack() {
+        data = mock(IrisData.class);
+        biomes = mock(ResourceLoader.class);
+        regions = mock(ResourceLoader.class);
+        when(data.getBiomeLoader()).thenReturn(biomes);
+        when(data.getRegionLoader()).thenReturn(regions);
+        when(data.getDataFolder()).thenReturn(temporary.getRoot());
+        when(regions.getFolderName()).thenReturn("regions");
+        dimension = new IrisDimension().setRegions(new KList<>("tropical"));
+        dimension.setLoadKey("overworld");
+    }
+
+    @Test(timeout = 2000L)
+    public void resolvesNestedChildrenCarvingAndShoreBiomesThroughCycles() {
+        IrisRegion tropical = region("tropical").setLandBiomes(new KList<>("wilds"));
+        biome("wilds").setChildren(new KList<>("highlands"));
+        IrisBiome highlands = biome("highlands").setChildren(new KList<>("wilds"))
+                .setCarvingBiome("chalk-gardens")
+                .setHydrologyPolicy(new IrisHydrologyPolicy().setShoreBiomes(new KList<>("shore")).setShoreBiomeWidth(4));
+        IrisBiome chalk = biome("chalk-gardens").setChildren(new KList<>("chalk-child"));
+        IrisBiome chalkChild = biome("chalk-child");
+        IrisBiome shore = biome("shore").setChildren(new KList<>("shore-child"));
+        IrisBiome shoreChild = biome("shore-child").setCarvingBiome("wilds");
+        dimension.setHydrology(new IrisHydrology().setEnabled(true));
+
+        for (IrisBiome focus : List.of(highlands, chalk, chalkChild, shore, shoreChild)) {
+            assertSame(tropical, dimension.resolveFocusRegion(focus, () -> data));
+        }
+        Set<String> natural = tropical.getNaturalBiomes(() -> data).stream()
+                .map(IrisBiome::getLoadKey).collect(Collectors.toSet());
+        assertEquals(Set.of("wilds", "highlands", "chalk-gardens", "chalk-child"), natural);
+    }
+
+    @Test
+    public void directCaveReferencesKeepTheirOwner() {
+        IrisRegion tropical = region("tropical").setCaveBiomes(new KList<>("cave"));
+
+        assertSame(tropical, dimension.resolveFocusRegion(biome("cave"), () -> data));
+    }
+
+    @Test
+    public void placedHydrologyShoreBiomesBelongToTheirRegion() {
+        IrisRegion tropical = region("tropical").setLandBiomes(new KList<>("wilds", "dunes"))
+                .setHydrologyPolicy(new IrisHydrologyPolicy().setShoreBiomes(new KList<>("beach")));
+        biome("wilds").setHydrologyPolicy(new IrisHydrologyPolicy().setShoreBiomes(new KList<>("reef")));
+        biome("dunes");
+        IrisBiome beach = biome("beach");
+        IrisBiome reef = biome("reef");
+        dimension.setHydrology(new IrisHydrology().setEnabled(true));
+
+        assertNotSame(tropical, dimension.resolveFocusRegion(beach, () -> data));
+        assertNotSame(tropical, dimension.resolveFocusRegion(reef, () -> data));
+        tropical.getHydrologyPolicy().setShoreBiomeWidth(3);
+        assertSame(tropical, dimension.resolveFocusRegion(beach, () -> data));
+        assertSame(tropical, dimension.resolveFocusRegion(reef, () -> data));
+        assertEquals(Set.of("wilds", "dunes"), tropical.getNaturalBiomes(() -> data).stream()
+                .map(IrisBiome::getLoadKey).collect(Collectors.toSet()));
+    }
+
+    @Test
+    public void directOwnerTakesPrecedenceOverAnotherRegionsChildReference() {
+        region("tropical").setLandBiomes(new KList<>("wilds"));
+        biome("wilds").setChildren(new KList<>("highlands"));
+        IrisRegion direct = region("direct").setLandBiomes(new KList<>("highlands"));
+        dimension.setRegions(new KList<>("tropical", "direct"));
+
+        assertSame(direct, dimension.resolveFocusRegion(biome("highlands"), () -> data));
+    }
+
+    @Test
+    public void unownedFocusIsNeutralAndStableAcrossDimensionInstances() {
+        region("tropical").setLandBiomes(new KList<>("unrelated"));
+        biome("unrelated");
+        IrisBiome focus = biome("standalone");
+        IrisRegion first = dimension.resolveFocusRegion(focus, () -> data);
+        IrisDimension reopened = new IrisDimension().setRegions(new KList<>("tropical"));
+        reopened.setLoadKey("overworld");
+        IrisRegion second = reopened.resolveFocusRegion(focus, () -> data);
+
+        assertEquals(first.getLoadKey(), second.getLoadKey());
+        assertEquals(new KList<>("standalone"), first.getLandBiomes());
+        assertEquals(new KList<>("standalone"), first.getSeaBiomes());
+        assertEquals(new KList<>("standalone"), first.getShoreBiomes());
+        assertEquals(new KList<>(), first.getCaveBiomes());
+        assertSame(data, first.getLoader());
+        assertFalse(first.getLoadFile().exists());
+        reopened.setLoadKey("underworld");
+        assertNotEquals(first.getLoadKey(), reopened.resolveFocusRegion(focus, () -> data).getLoadKey());
+        assertNotEquals(first.getLoadKey(), dimension.resolveFocusRegion(biome("other"), () -> data).getLoadKey());
+    }
+
+    private IrisBiome biome(String key) {
+        IrisBiome biome = new IrisBiome();
+        biome.setLoadKey(key);
+        when(biomes.load(key)).thenReturn(biome);
+        return biome;
+    }
+
+    private IrisRegion region(String key) {
+        IrisRegion region = new IrisRegion();
+        region.setLoadKey(key);
+        when(regions.load(key)).thenReturn(region);
+        return region;
+    }
+}

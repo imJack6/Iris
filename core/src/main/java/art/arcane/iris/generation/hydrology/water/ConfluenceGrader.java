@@ -1,0 +1,169 @@
+package art.arcane.iris.generation.hydrology.water;
+
+import art.arcane.iris.generation.hydrology.plan.WindowKey;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public final class ConfluenceGrader {
+    public static final float POOL_MARGIN = 2f;
+    public static final float POOL_CAP = 64f;
+    public static final float APPROACH_SLOPE = 0.25f;
+    public static final int MARGIN_LOWERING = 5;
+    public static final int MAX_START_LOWERING = 1;
+
+    private ConfluenceGrader() {
+    }
+
+    public record Footprint(float[] xs, float[] zs, float[] halfWidth) {
+    }
+
+    public static int[] settle(Footprint feeder, int[] grade, boolean[] fixed, List<Footprint> receiving, int level, int waterfallMinDrop) {
+        int last = grade.length - 1;
+        double[] arc = arcFromEnd(feeder);
+        int[] settled = lower(grade, grade, last, level);
+        int edge = last;
+        for (int point = last - 1; point >= 0 && pooled(feeder, fixed, receiving, arc, point, grade[point] - level); point--) {
+            settled = lower(settled, grade, point, level);
+            edge = point;
+        }
+        int meet = approach(grade, fixed, arc, edge, level, waterfallMinDrop);
+        for (int point = edge - 1; point > meet; point--) {
+            settled = lower(settled, grade, point, envelope(arc, edge, point, level));
+        }
+        return settled;
+    }
+
+    public static void spreadJunction(int[] settled, int[] grade, boolean[] fixed, int waterfallMinDrop, int startLimit) {
+        int lowered = 0;
+        while (settled[lowered] == grade[lowered]) {
+            lowered++;
+        }
+        for (int point = settled.length - 2; point >= 0; point--) {
+            if (!ReachGrader.spreadPoint(settled, point, waterfallMinDrop, startLimit, fixed) && point < lowered) {
+                return;
+            }
+        }
+    }
+
+    static boolean[] level(WindowKey window, List<ReachDraft> drafts, int[] upstreamFirst) {
+        boolean[] touched = new boolean[drafts.size()];
+        for (int position = upstreamFirst.length - 1; position >= 0; position--) {
+            ReachDraft downstream = drafts.get(upstreamFirst[position]);
+            for (int feeder : downstream.incoming) {
+                ReachDraft draft = drafts.get(feeder);
+                requireJunction(window, draft, downstream);
+                boolean[] fixed = draft.fixed();
+                fixed[0] |= draft.incoming.length > 0 && draft.grade[0] - downstream.grade[0] > MAX_START_LOWERING;
+                int waterfallMinDrop = draft.tier.waterfallMinDrop();
+                int[] settled = settle(footprint(draft), draft.grade, fixed, receiving(drafts, downstream, feeder), downstream.grade[0],
+                        waterfallMinDrop);
+                if (settled == draft.grade) {
+                    continue;
+                }
+                if (!draft.tier.cascades()) {
+                    spreadJunction(settled, draft.grade, fixed, waterfallMinDrop, ReachGrader.startLimit(drafts, draft));
+                }
+                draft.grade = settled;
+                touched[feeder] = true;
+            }
+        }
+        return touched;
+    }
+
+    static double edgeDistance(Footprint channel, double x, double z) {
+        float[] xs = channel.xs();
+        float[] zs = channel.zs();
+        float[] halfWidth = channel.halfWidth();
+        double nearest = Double.POSITIVE_INFINITY;
+        for (int segment = 0; segment + 1 < xs.length; segment++) {
+            double ax = xs[segment];
+            double az = zs[segment];
+            double dx = xs[segment + 1] - ax;
+            double dz = zs[segment + 1] - az;
+            double length = dx * dx + dz * dz;
+            double t = length == 0D ? 0D : Math.clamp(((x - ax) * dx + (z - az) * dz) / length, 0D, 1D);
+            double offsetX = x - (ax + t * dx);
+            double offsetZ = z - (az + t * dz);
+            double width = halfWidth[segment] + t * (halfWidth[segment + 1] - halfWidth[segment]);
+            nearest = Math.min(nearest, Math.sqrt(offsetX * offsetX + offsetZ * offsetZ) - width);
+        }
+        return nearest;
+    }
+
+    private static void requireJunction(WindowKey window, ReachDraft feeder, ReachDraft downstream) {
+        if (downstream.grade[0] <= feeder.last()) {
+            return;
+        }
+        int end = feeder.xs.length - 1;
+        throw new IllegalStateException("Window " + window + " reach " + downstream.id + " starts at " + downstream.grade[0] + ", above the end "
+                + feeder.last() + " of its feeder reach " + feeder.id + " at junction " + feeder.xs[end] + "," + feeder.zs[end]);
+    }
+
+    private static boolean pooled(Footprint feeder, boolean[] fixed, List<Footprint> receiving, double[] arc, int point, int lowering) {
+        if (arc[point] > POOL_CAP || fixed[point]) {
+            return false;
+        }
+        double reach = feeder.halfWidth()[point] + POOL_MARGIN;
+        boolean beside = false;
+        for (Footprint channel : receiving) {
+            double edge = edgeDistance(channel, feeder.xs()[point], feeder.zs()[point]);
+            if (edge <= 0D) {
+                return true;
+            }
+            beside |= edge <= reach;
+        }
+        return beside && lowering <= MARGIN_LOWERING;
+    }
+
+    private static int approach(int[] grade, boolean[] fixed, double[] arc, int edge, int level, int waterfallMinDrop) {
+        double window = (waterfallMinDrop - 1) / (double) APPROACH_SLOPE;
+        for (int point = edge - 1; point >= 0 && arc[point] - arc[edge] <= window; point--) {
+            if (grade[point] <= envelope(arc, edge, point, level)) {
+                return point;
+            }
+            if (fixed[point]) {
+                return edge;
+            }
+        }
+        return edge;
+    }
+
+    private static int envelope(double[] arc, int edge, int point, int level) {
+        return level + (int) Math.floor(APPROACH_SLOPE * (arc[point] - arc[edge]));
+    }
+
+    private static int[] lower(int[] settled, int[] grade, int point, int ceiling) {
+        if (settled[point] <= ceiling) {
+            return settled;
+        }
+        int[] lowered = settled == grade ? grade.clone() : settled;
+        lowered[point] = ceiling;
+        return lowered;
+    }
+
+    private static double[] arcFromEnd(Footprint feeder) {
+        float[] xs = feeder.xs();
+        float[] zs = feeder.zs();
+        double[] arc = new double[xs.length];
+        for (int point = xs.length - 2; point >= 0; point--) {
+            arc[point] = arc[point + 1] + Math.hypot(xs[point + 1] - xs[point], zs[point + 1] - zs[point]);
+        }
+        return arc;
+    }
+
+    private static Footprint footprint(ReachDraft draft) {
+        return new Footprint(draft.xs, draft.zs, draft.halfWidth);
+    }
+
+    private static List<Footprint> receiving(List<ReachDraft> drafts, ReachDraft downstream, int feeder) {
+        List<Footprint> receiving = new ArrayList<>(downstream.incoming.length);
+        receiving.add(footprint(downstream));
+        for (int sibling : downstream.incoming) {
+            if (sibling != feeder) {
+                receiving.add(footprint(drafts.get(sibling)));
+            }
+        }
+        return receiving;
+    }
+}
